@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS strong_pool (
 CREATE INDEX IF NOT EXISTS idx_strong_pool_date ON strong_pool(trade_date);
 
 CREATE TABLE IF NOT EXISTS lhb_detail (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     stock_code    TEXT NOT NULL,
     trade_date    TEXT NOT NULL,
     buy_amount    REAL,
@@ -63,8 +64,7 @@ CREATE TABLE IF NOT EXISTS lhb_detail (
     buy_depart    TEXT,
     sell_depart   TEXT,
     reason        TEXT,
-    snapshot_time TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (stock_code, trade_date, snapshot_time)
+    snapshot_time TEXT DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_date ON lhb_detail(trade_date);
