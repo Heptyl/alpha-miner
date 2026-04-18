@@ -1,0 +1,88 @@
+# 因子挖掘知识库 — 从行为金融学和实盘认知提取的假说种子
+
+theories:
+  - id: info_cascade
+    name: "信息瀑布模型"
+    source: "BHW 1992 + 实盘验证"
+    core_claim: "涨停板触发全市场注意力阈值信号，后续观察者放弃私有判断跟随公共信号"
+    testable_predictions:
+      - id: cascade_momentum
+        prediction: "首次涨停后，如果封单稳定，次日高开概率显著高于随机"
+        factor_type: conditional
+        conditions: ["首次涨停", "封板未开过", "流通市值>20亿"]
+        target: "次日收益率"
+
+      - id: cascade_break_crash
+        prediction: "连板股断板后，反向瀑布导致跌幅远超正常调整"
+        factor_type: conditional
+        conditions: ["前日连板>=3", "今日炸板"]
+        target: "未来3日收益率（应为负）"
+
+      - id: seal_decay_warning
+        prediction: "封板单量连续下降是断板前兆，领先断板1-2日"
+        factor_type: formula
+        expression: "封板单量 3日变化率"
+        target: "次日是否炸板"
+
+  - id: three_shift
+    name: "三班组手法"
+    source: "深华发A复盘"
+    core_claim: "游资分三班协作拉升出货，识别信号可规避天地板"
+    testable_predictions:
+      - id: small_cap_trap
+        prediction: "小市值+低换手+无题材的连板股，天地板概率极高"
+        factor_type: conditional
+        conditions: ["流通市值<20亿", "换手率<10%", "无明确题材", "连板>=3"]
+        target: "未来3日最大跌幅"
+
+      - id: fund_flow_diverge_exit
+        prediction: "超大单买+大单卖的背离出现在高位连板时，是出货信号"
+        factor_type: conditional
+        conditions: ["连板>=3", "超大单净流入>0", "大单净流出>0"]
+        target: "次日收益率（应为负）"
+
+  - id: theme_lifecycle
+    name: "题材生命周期"
+    source: "计划中的四阶段模型"
+    core_claim: "题材有启动→爆发→高潮→衰退的生命周期，不同阶段策略不同"
+    testable_predictions:
+      - id: early_theme_alpha
+        prediction: "题材启动期（1-2日，涨停1-3家）买入，未来5日收益最高"
+        factor_type: conditional
+        conditions: ["所属题材连续涨停天数<=2", "题材涨停家数<=3"]
+        target: "未来5日收益率"
+
+      - id: crowded_theme_decay
+        prediction: "题材拥挤度>30%（占全市场涨停比例）时，题材即将见顶"
+        factor_type: formula
+        expression: "题材涨停家数 / 全市场涨停家数"
+        target: "未来3日题材平均收益"
+
+      - id: narrative_exhaustion
+        prediction: "龙头高位换手率暴增+股价不创新高=出货，题材衰退"
+        factor_type: conditional
+        conditions: ["是题材龙头", "换手率>前5日均值200%", "未创近3日新高"]
+        target: "未来3日收益率"
+
+  - id: emotion_regime
+    name: "情绪驱动的策略切换"
+    source: "情绪判断框架"
+    core_claim: "不同情绪级别下，最优策略截然不同"
+    testable_predictions:
+      - id: strong_emotion_board_alpha
+        prediction: "情绪极强时（涨停>80家），追高位龙头仍有正收益"
+        factor_type: conditional
+        conditions: ["全市场涨停>80家", "个股连板>=3"]
+        target: "次日收益率"
+
+      - id: weak_emotion_avoid
+        prediction: "情绪极弱时（涨停<20家），任何打板策略都是负期望"
+        factor_type: conditional
+        conditions: ["全市场涨停<20家"]
+        target: "涨停股次日平均收益（应为负或极低）"
+
+      - id: emotion_reversal
+        prediction: "情绪极弱持续3日以上，第4日开始涨停股次日收益回升"
+        factor_type: conditional
+        conditions: ["连续3日涨停<20家", "今日涨停家数开始回升"]
+        target: "次日涨停股平均收益"
