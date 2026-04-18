@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class LeaderClarityFactor(BaseFactor):
@@ -28,6 +28,8 @@ class LeaderClarityFactor(BaseFactor):
         )
         concept_map_df = db.query("concept_mapping", as_of)
 
+        zt_df = dedup_latest(zt_df)
+        concept_map_df = dedup_latest(concept_map_df, key_cols=("stock_code", "concept_name"))
         self.validate_no_future(as_of, zt_df)
 
         if zt_df.empty or concept_map_df.empty:

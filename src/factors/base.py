@@ -17,6 +17,20 @@ import pandas as pd
 from src.data.storage import Storage
 
 
+def dedup_latest(df: pd.DataFrame, key_cols: tuple[str, ...] = ("stock_code", "trade_date"), time_col: str = "snapshot_time") -> pd.DataFrame:
+    """对 query 结果去重：按 key_cols 分组，保留最新 snapshot_time 的记录。
+
+    防止多次采集产生的重复数据影响因子计算。
+    如果 DataFrame 为空或缺少 snapshot_time 列，原样返回。
+    """
+    if df.empty:
+        return df
+    if time_col not in df.columns:
+        # 没有 snapshot_time 列，用 drop_duplicates 保底
+        return df.drop_duplicates(subset=list(key_cols), keep="last")
+    return df.sort_values(time_col).groupby(list(key_cols)).last().reset_index()
+
+
 class FutureDataError(Exception):
     """因子计算中检测到使用未来数据。"""
     pass
@@ -125,6 +139,9 @@ class Condition:
 
         if data.empty:
             return pd.Series(dtype=float, name=self.name)
+
+        # 去重：多次采集可能产生重复记录
+        data = dedup_latest(data)
 
         # 取每个股票最新一天的数据
         data = data.sort_values("trade_date").groupby("stock_code").last()

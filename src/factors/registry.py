@@ -10,16 +10,13 @@ from src.factors.base import BaseFactor
 
 
 class FactorRegistry:
-    """因子注册表，管理所有已注册的因子。"""
+    """因子注册表，管理所有已注册的因子。
 
-    _instance: Optional["FactorRegistry"] = None
-    _factors: dict[str, BaseFactor] = {}
+    每个实例独立持有 _factors，无单例状态泄露。
+    """
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._factors = {}
-        return cls._instance
+    def __init__(self):
+        self._factors: dict[str, BaseFactor] = {}
 
     def load_from_yaml(self, yaml_path: str = "config/factors.yaml") -> None:
         """从 YAML 文件加载因子配置。"""

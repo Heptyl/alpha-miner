@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS lhb_detail (
     buy_depart    TEXT,
     sell_depart   TEXT,
     reason        TEXT,
-    snapshot_time TEXT DEFAULT (datetime('now'))
+    snapshot_time TEXT DEFAULT (datetime('now')),
+    UNIQUE(stock_code, trade_date, buy_depart, sell_depart)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lhb_detail_date ON lhb_detail(trade_date);

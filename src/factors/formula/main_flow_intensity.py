@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class MainFlowIntensityFactor(BaseFactor):
@@ -27,6 +27,7 @@ class MainFlowIntensityFactor(BaseFactor):
             where="trade_date = ?",
             params=(date_str,),
         )
+        flow_df = dedup_latest(flow_df)
         self.validate_no_future(as_of, flow_df)
 
         # 成交额
@@ -36,6 +37,7 @@ class MainFlowIntensityFactor(BaseFactor):
             where="trade_date = ?",
             params=(date_str,),
         )
+        price_df = dedup_latest(price_df)
         self.validate_no_future(as_of, price_df, date_col="trade_date")
 
         # 构建主力净流入映射

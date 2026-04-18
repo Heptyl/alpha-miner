@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class NarrativeVelocityFactor(BaseFactor):
@@ -37,6 +37,8 @@ class NarrativeVelocityFactor(BaseFactor):
             params=(f"{prev_date}%",),
         )
 
+        news_today = dedup_latest(news_today, key_cols=("stock_code", "title"), time_col="publish_time")
+        news_prev = dedup_latest(news_prev, key_cols=("stock_code", "title"), time_col="publish_time")
         self.validate_no_future(as_of, news_today, date_col="publish_time")
         self.validate_no_future(as_of, news_prev, date_col="publish_time")
 

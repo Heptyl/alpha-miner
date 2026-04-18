@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class LhbInstitutionFactor(BaseFactor):
@@ -29,6 +29,7 @@ class LhbInstitutionFactor(BaseFactor):
             where="trade_date = ?",
             params=(date_str,),
         )
+        lhb_df = dedup_latest(lhb_df, key_cols=("stock_code", "trade_date", "buy_depart", "sell_depart"))
         self.validate_no_future(as_of, lhb_df)
 
         if lhb_df.empty:

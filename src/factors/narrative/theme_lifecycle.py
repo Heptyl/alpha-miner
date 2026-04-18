@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class ThemeLifecycleFactor(BaseFactor):
@@ -27,10 +27,12 @@ class ThemeLifecycleFactor(BaseFactor):
             where="trade_date = ?",
             params=(date_str,),
         )
+        concept_daily_df = dedup_latest(concept_daily_df, key_cols=("concept_name", "trade_date"))
         self.validate_no_future(as_of, concept_daily_df)
 
         # 概念映射
         concept_map_df = db.query("concept_mapping", as_of)
+        concept_map_df = dedup_latest(concept_map_df, key_cols=("stock_code", "concept_name"))
 
         if concept_daily_df.empty or concept_map_df.empty:
             return pd.Series(0.0, index=universe, name=self.name)

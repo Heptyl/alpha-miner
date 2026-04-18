@@ -93,7 +93,7 @@ def _collect_backfill(days: int, db: Storage) -> None:
     for i, date_str in enumerate(dates, 1):
         console.print(f"\n[{i}/{len(dates)}] {date_str}")
         try:
-            results = collect_date(date_str, db)
+            results = collect_date(date_str, db, mode="backfill")
             day_total = sum(results.values())
             if day_total > 0:
                 success += 1

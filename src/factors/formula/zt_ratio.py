@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class ZtDtRatioFactor(BaseFactor):
@@ -30,6 +30,8 @@ class ZtDtRatioFactor(BaseFactor):
             as_of,
             lookback_days=1,
         )
+        zt_df = dedup_latest(zt_df)
+        daily_df = dedup_latest(daily_df)
         self.validate_no_future(as_of, zt_df)
         self.validate_no_future(as_of, daily_df, date_col="trade_date")
 

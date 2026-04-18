@@ -21,7 +21,7 @@ from src.data.sources import (
 )
 
 
-def collect_date(trade_date: str, db: Optional[Storage] = None) -> dict[str, int]:
+def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "today") -> dict[str, int]:
     """采集指定日期的全市场数据。
 
     逐个调用数据源，单源失败不影响其他源。
@@ -30,6 +30,7 @@ def collect_date(trade_date: str, db: Optional[Storage] = None) -> dict[str, int
     Args:
         trade_date: 交易日期 YYYY-MM-DD
         db: 数据库实例，None 时使用默认路径
+        mode: "today" 用实时行情, "backfill" 用历史日K线
 
     Returns:
         dict: {source_name: row_count}
@@ -40,9 +41,12 @@ def collect_date(trade_date: str, db: Optional[Storage] = None) -> dict[str, int
 
     results = {}
 
-    # 1. 日K线
+    # 1. 日K线 — today 模式用实时行情, backfill 模式用历史日K线
     try:
-        df = akshare_price.fetch(trade_date)
+        if mode == "backfill":
+            df = akshare_price.fetch_history(trade_date)
+        else:
+            df = akshare_price.fetch_today(trade_date)
         count = akshare_price.save(df, db)
         results["daily_price"] = count
         print(f"  [OK] daily_price: {count} rows")
@@ -138,7 +142,7 @@ def collect_date(trade_date: str, db: Optional[Storage] = None) -> dict[str, int
 
 
 def _aggregate_market_emotion(trade_date: str, db: Storage) -> None:
-    """从 zt_pool 数据聚合市场情绪。"""
+    """从 zt_pool + daily_price 数据聚合市场情绪。"""
     zt_df = db.query(
         "zt_pool",
         datetime(2099, 1, 1),
@@ -153,7 +157,25 @@ def _aggregate_market_emotion(trade_date: str, db: Storage) -> None:
     )
 
     zt_count = len(zt_df) if not zt_df.empty else 0
-    dt_count = 0  # 跌停数需要从 daily_price 推算（跌幅 > 9.5%）
+
+    # 跌停数：从 daily_price 筛选 pct_change < -9.5%（考虑四舍五入）
+    price_df = db.query(
+        "daily_price",
+        datetime(2099, 1, 1),
+        where="trade_date = ?",
+        params=(trade_date,),
+    )
+    dt_count = 0
+    if not price_df.empty and "close" in price_df.columns:
+        # 需要前一日收盘价计算跌幅
+        # 用 pct_change 列（如果有），否则从 open/close 近似
+        if "pct_change" in price_df.columns:
+            dt_count = int((pd.to_numeric(price_df["pct_change"], errors="coerce") < -9.5).sum())
+        elif "open" in price_df.columns:
+            # 近似：close/open < 0.905 视为跌停（不太精确但可用）
+            ratio = price_df["close"] / price_df["open"].replace(0, float("nan"))
+            dt_count = int((ratio < 0.905).sum())
+
     zb_count = len(zb_df) if not zb_df.empty else 0
 
     # 最高连板

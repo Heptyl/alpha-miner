@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.data.storage import Storage
-from src.factors.base import BaseFactor
+from src.factors.base import BaseFactor, dedup_latest
 
 
 class ConsecutiveBoardFactor(BaseFactor):
@@ -24,6 +24,7 @@ class ConsecutiveBoardFactor(BaseFactor):
             where="trade_date = ?",
             params=(as_of.strftime("%Y-%m-%d"),),
         )
+        zt_df = dedup_latest(zt_df)
         self.validate_no_future(as_of, zt_df)
 
         if zt_df.empty:
