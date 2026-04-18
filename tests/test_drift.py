@@ -106,3 +106,107 @@ class TestICTracker:
 
         status = tracker.current_status("nonexistent")
         assert status["status"] == "no_data"
+
+
+# ============================================================
+# CUSUM Tests
+# ============================================================
+
+class TestCUSUM:
+    def test_no_changepoint(self):
+        """平稳序列无变点。"""
+        from src.drift.cusum import detect_changepoints
+
+        np.random.seed(42)
+        series = pd.Series(np.random.randn(50) * 0.1)
+        result = detect_changepoints(series, threshold=2.0, min_segment=10)
+        assert len(result.changepoints) == 0
+        assert result.series_length == 50
+
+    def test_detect_changepoint(self):
+        """有均值漂移的序列应检测到变点。"""
+        from src.drift.cusum import detect_changepoints
+
+        np.random.seed(42)
+        series = pd.Series(np.concatenate([
+            np.random.randn(25) + 0,   # 均值 0
+            np.random.randn(25) + 3,   # 均值 3 (跳变)
+        ]))
+        result = detect_changepoints(series, threshold=1.0, min_segment=10)
+        assert len(result.changepoints) >= 1
+        # 变点应在 25 附近
+        assert any(abs(cp - 25) < 10 for cp in result.changepoints)
+
+    def test_short_series(self):
+        """短序列不检测。"""
+        from src.drift.cusum import detect_changepoints
+
+        series = pd.Series([1.0, 2.0, 3.0])
+        result = detect_changepoints(series)
+        assert len(result.changepoints) == 0
+
+
+# ============================================================
+# Regime Tests
+# ============================================================
+
+class TestRegime:
+    def test_normal_regime(self, tmp_path):
+        """无极端数据时返回 normal。"""
+        from src.drift.regime import RegimeDetector
+
+        storage = Storage(str(tmp_path / "test.db"))
+        storage.init_db()
+
+        # 少量正常数据（混合涨跌）
+        storage.insert("daily_price", pd.DataFrame([
+            {"stock_code": "000001", "trade_date": "2024-06-14",
+             "open": 10.0, "high": 10.5, "low": 9.5, "close": 10.1,
+             "volume": 1000, "amount": 10100, "turnover_rate": 2.0},
+            {"stock_code": "000002", "trade_date": "2024-06-14",
+             "open": 20.0, "high": 20.5, "low": 19.5, "close": 19.8,
+             "volume": 2000, "amount": 39600, "turnover_rate": 3.0},
+            {"stock_code": "000003", "trade_date": "2024-06-14",
+             "open": 15.0, "high": 15.5, "low": 14.5, "close": 15.2,
+             "volume": 1500, "amount": 22800, "turnover_rate": 2.5},
+            {"stock_code": "000004", "trade_date": "2024-06-14",
+             "open": 8.0, "high": 8.5, "low": 7.5, "close": 7.8,
+             "volume": 800, "amount": 6240, "turnover_rate": 1.5},
+        ]), snapshot_time=SNAP)
+
+        detector = RegimeDetector(storage)
+        regime = detector.detect(AS_OF)
+        assert regime.regime == "normal"
+
+    def test_board_rally_regime(self, tmp_path):
+        """连板潮 regime。"""
+        from src.drift.regime import RegimeDetector
+
+        storage = Storage(str(tmp_path / "test.db"))
+        storage.init_db()
+
+        # 30+ 涨停，最高4+连板
+        zt_rows = [
+            {"stock_code": f"0000{i:02d}", "trade_date": "2024-06-14",
+             "consecutive_zt": 4 if i == 0 else 1, "amount": 50000,
+             "circulation_mv": 200000, "open_count": 0, "zt_stats": "4/4"}
+            for i in range(35)
+        ]
+        storage.insert("zt_pool", pd.DataFrame(zt_rows), snapshot_time=SNAP)
+
+        # daily_price 也需要（混合涨跌避免触发 broad_move）
+        price_rows = []
+        for i in range(40):
+            close = 10.5 if i % 2 == 0 else 9.8  # 交替涨跌
+            price_rows.append({
+                "stock_code": f"0000{i:02d}", "trade_date": "2024-06-14",
+                "open": 10.0, "high": max(close, 10.5), "low": min(close, 9.5),
+                "close": close, "volume": 1000, "amount": close * 1000,
+                "turnover_rate": 3.0,
+            })
+        storage.insert("daily_price", pd.DataFrame(price_rows), snapshot_time=SNAP)
+
+        detector = RegimeDetector(storage)
+        regime = detector.detect(AS_OF)
+        assert regime.regime == "board_rally"
+        assert regime.confidence > 0
