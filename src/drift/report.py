@@ -39,7 +39,7 @@ class DriftReport:
         regime = self.regime_detector.detect(as_of)
 
         # 2. 所有因子状态
-        factor_names = self.registry.list_names()
+        factor_names = self.registry.list_factors()
         factors = []
         for name in factor_names:
             status = self.ic_tracker.current_status(name, window=ic_window)
