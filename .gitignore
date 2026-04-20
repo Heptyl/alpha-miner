@@ -8,3 +8,5 @@ data/
 uv.lock
 # reports/  # 调试阶段暂提交，正式运行后排除
 
+reports/
+factors/

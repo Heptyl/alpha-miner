@@ -150,9 +150,18 @@ class DailyBrief:
     # 交付物一：市场温度计
     # ================================================================
 
-    def build_thermometer(self, as_of: datetime) -> MarketThermometer:
-        date_str = as_of.strftime("%Y-%m-%d")
-        thermo = MarketThermometer(date=date_str)
+    def build_thermometer(self, as_of: datetime, report_date: str = "") -> MarketThermometer:
+        """构建市场温度计。
+        
+        Args:
+            as_of: 时间隔离点（必须大于数据 snapshot_time）
+            report_date: 报告目标交易日（默认取 as_of 前一天）
+        """
+        if not report_date:
+            # 默认取 as_of 前一天作为报告日
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
+        thermo = MarketThermometer(date=report_date)
 
         # 1. regime
         regime_info = self.regime_detector.detect(as_of)
@@ -162,7 +171,7 @@ class DailyBrief:
 
         # 2. 市场情绪指标
         market_df = self.db.query("market_emotion", as_of,
-                                  where="trade_date = ?", params=(date_str,))
+                                  where="trade_date = ?", params=(report_date,))
         if not market_df.empty:
             row = market_df.iloc[-1]
             thermo.zt_count = int(row.get("zt_count", 0))
@@ -171,7 +180,7 @@ class DailyBrief:
 
         # 炸板数
         zb_df = self.db.query("zb_pool", as_of,
-                              where="trade_date = ?", params=(date_str,))
+                              where="trade_date = ?", params=(report_date,))
         thermo.zb_count = len(zb_df) if not zb_df.empty else 0
 
         # 3. 情绪级别判定
@@ -262,9 +271,12 @@ class DailyBrief:
         self,
         as_of: datetime,
         top_n: int = 10,
+        report_date: str = "",
     ) -> list[CandidateCard]:
         """综合打分，返回 Top N 候选卡片。"""
-        date_str = as_of.strftime("%Y-%m-%d")
+        if not report_date:
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # 1. 获取 regime 权重
         regime_info = self.regime_detector.detect(as_of)
@@ -276,17 +288,21 @@ class DailyBrief:
 
         for name in factor_names:
             status = self.ic_tracker.current_status(name, window=20)
-            if status["status"] in ("dead", "negative", "no_data"):
-                continue
 
-            ic = status.get("ic_avg", 0)
-            if np.isnan(ic):
-                ic = 0
+            # IC 无数据时用等权（默认 IC=0.05）
+            if status["status"] == "no_data":
+                ic = 0.05
+            elif status["status"] in ("dead", "negative"):
+                continue
+            else:
+                ic = status.get("ic_avg", 0)
+                if np.isnan(ic):
+                    ic = 0
 
             fv_df = self.db.query(
                 "factor_values", as_of,
                 where="factor_name = ? AND trade_date = ?",
-                params=(name, date_str),
+                params=(name, report_date),
             )
             if fv_df.empty:
                 continue
@@ -353,7 +369,7 @@ class DailyBrief:
                 c.pct = round(abs(c.contribution) / total_contrib * 100, 1) if total_contrib > 0 else 0
 
             # 获取标签（连板、题材等）
-            tags = self._get_stock_tags(code, as_of)
+            tags = self._get_stock_tags(code, as_of, report_date)
 
             # 建议判定
             severe_flags = sum(1 for c in contributions if c.value < -0.5)
@@ -374,15 +390,17 @@ class DailyBrief:
         cards.sort(key=lambda c: c.score_normalized, reverse=True)
         return cards[:top_n]
 
-    def _get_stock_tags(self, code: str, as_of: datetime) -> list[str]:
+    def _get_stock_tags(self, code: str, as_of: datetime, report_date: str = "") -> list[str]:
         """获取股票标签：连板数、概念等。"""
         tags = []
-        date_str = as_of.strftime("%Y-%m-%d")
+        if not report_date:
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # 连板
         zt_df = self.db.query("zt_pool", as_of,
                               where="stock_code = ? AND trade_date = ?",
-                              params=(code, date_str))
+                              params=(code, report_date))
         if not zt_df.empty and "consecutive_zt" in zt_df.columns:
             boards = int(zt_df.iloc[-1]["consecutive_zt"])
             if boards >= 2:
@@ -422,18 +440,24 @@ class DailyBrief:
         self,
         as_of: datetime,
         holdings: list[str],
+        report_date: str = "",
     ) -> list[HoldingAlert]:
         """对持仓股跑风险检测。"""
+        if not report_date:
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
         alerts = []
         for code in holdings:
-            alert = self._check_holding(code, as_of)
+            alert = self._check_holding(code, as_of, report_date)
             if alert:
                 alerts.append(alert)
         return alerts
 
-    def _check_holding(self, code: str, as_of: datetime) -> Optional[HoldingAlert]:
+    def _check_holding(self, code: str, as_of: datetime, report_date: str = "") -> Optional[HoldingAlert]:
         """检查单只持仓股风险。"""
-        date_str = as_of.strftime("%Y-%m-%d")
+        if not report_date:
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
         alert = HoldingAlert(stock_code=code)
 
         # 1. 三班组风险检测（小市值 + 低换手 + 无题材）
@@ -442,7 +466,7 @@ class DailyBrief:
 
         price_df = self.db.query("daily_price", as_of,
                                  where="stock_code = ? AND trade_date = ?",
-                                 params=(code, date_str))
+                                 params=(code, report_date))
         if not price_df.empty:
             row = price_df.iloc[-1]
             turnover = float(row.get("turnover_rate", 0))
@@ -468,7 +492,7 @@ class DailyBrief:
         # 2. 资金流背离检测
         fund_df = self.db.query("fund_flow", as_of,
                                 where="stock_code = ? AND trade_date = ?",
-                                params=(code, date_str))
+                                params=(code, report_date))
         if not fund_df.empty:
             row = fund_df.iloc[-1]
             super_large = float(row.get("super_large_net", 0))
@@ -505,12 +529,12 @@ class DailyBrief:
                 # 统计同概念涨停数
                 zt_concept = self.db.query("zt_pool", as_of,
                                            where="trade_date = ?",
-                                           params=(date_str,))
+                                           params=(report_date,))
                 if not zt_concept.empty:
                     # 简化：统计涨停股数占总数比例
                     total_stocks = len(self.db.query("daily_price", as_of,
                                                      where="trade_date = ?",
-                                                     params=(date_str,)))
+                                                     params=(report_date,)))
                     zt_count = len(zt_concept)
                     if total_stocks > 0:
                         crowd_ratio = zt_count / total_stocks
@@ -666,12 +690,17 @@ class DailyBrief:
         as_of: datetime,
         holdings: Optional[list[str]] = None,
         top_n: int = 10,
+        report_date: str = "",
     ) -> str:
         """生成完整盘后简报。"""
         parts = []
 
+        if not report_date:
+            from datetime import timedelta
+            report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
+
         # 交付物一：市场温度计
-        thermo = self.build_thermometer(as_of)
+        thermo = self.build_thermometer(as_of, report_date=report_date)
         parts.append(self.format_thermometer(thermo))
 
         # 如果情绪极弱，跳过候选卡片
@@ -679,7 +708,7 @@ class DailyBrief:
             parts.append("\n⚠ 情绪极弱，建议休息，不生成候选卡片。")
         else:
             # 交付物二：候选决策卡片
-            candidates = self.build_candidates(as_of, top_n=top_n)
+            candidates = self.build_candidates(as_of, top_n=top_n, report_date=report_date)
             if candidates:
                 parts.append(f"\n候选决策卡片（Top {len(candidates)}）：")
                 for card in candidates:
@@ -690,7 +719,7 @@ class DailyBrief:
 
         # 交付物三：持仓风险预警
         if holdings:
-            alerts = self.build_holding_alerts(as_of, holdings)
+            alerts = self.build_holding_alerts(as_of, holdings, report_date=report_date)
             if alerts:
                 parts.append("\n持仓风险预警：")
                 for alert in alerts:

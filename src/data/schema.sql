@@ -192,3 +192,34 @@ CREATE TABLE IF NOT EXISTS mining_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mining_log_name ON mining_log(factor_name);
+
+CREATE TABLE IF NOT EXISTS market_scripts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date TEXT NOT NULL,
+    script_title TEXT,
+    script_narrative TEXT,
+    theme_verdicts TEXT,
+    tomorrow_playbook TEXT,
+    risk_alerts TEXT,
+    raw_snapshot TEXT,
+    replay_result TEXT,
+    snapshot_time TEXT DEFAULT (datetime('now')),
+    UNIQUE(trade_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_scripts_date ON market_scripts(trade_date);
+
+CREATE TABLE IF NOT EXISTS replay_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date       TEXT UNIQUE NOT NULL,
+    regime_match     INTEGER DEFAULT 0,
+    playbook_hits    TEXT DEFAULT '[]',
+    playbook_misses  TEXT DEFAULT '[]',
+    surprise_events  TEXT DEFAULT '[]',
+    narrative        TEXT DEFAULT '',
+    lessons          TEXT DEFAULT '[]',
+    adjustment_suggestions TEXT DEFAULT '[]',
+    snapshot_time    TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_log_date ON replay_log(trade_date);

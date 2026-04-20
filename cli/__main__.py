@@ -31,6 +31,12 @@ if __name__ == "__main__":
     elif sub == "backtest":
         from cli.backtest import main
         main()
+    elif sub == "script":
+        from cli.report import main_script
+        main_script()
+    elif sub == "replay":
+        from cli.report import main_replay
+        main_replay()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()
@@ -40,6 +46,8 @@ if __name__ == "__main__":
         print("  mine      因子进化挖掘")
         print("  drift     漂移检测")
         print("  backtest  回测")
+        print("  script    生成市场剧本")
+        print("  replay    复盘昨日剧本")
     else:
         print(f"Unknown command: {sub}")
         sys.exit(1)

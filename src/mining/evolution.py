@@ -207,36 +207,432 @@ class EvolutionEngine:
             return None
 
     def _template_construct(self, candidate: Candidate) -> str:
-        """无 LLM 时的模板代码生成。"""
+        """无 LLM 时，为知识库中的 11 个种子假说生成可执行模板代码。
+
+        每个模板包含真实的 compute() 逻辑，从 Storage 读取数据并计算因子值。
+        非种子假说回退到基础骨架。
+        """
+        name = candidate.name
+
+        # ── 种子模板映射表 ──
+        templates = {
+            # ── 信息瀑布 ──
+            "cascade_momentum": '''"""信息瀑布：首次涨停后封板稳定 → 次日高开概率高"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+    yesterday = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 查今日涨停池
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if zt.empty:
+            continue
+        row = zt.iloc[-1]
+
+        # 首次涨停（consecutive_zt == 1）
+        cons = int(row.get("consecutive_zt", 0))
+        if cons != 1:
+            continue
+
+        # 封板未开过（seal_times == 1 或 open_times 不存在或为0）
+        seal_times = int(row.get("seal_times", 1))
+        open_times = int(row.get("open_times", 0))
+
+        # 封单金额（越大越好）
+        seal_amt = float(row.get("seal_amount", 0))
+
+        # 综合评分
+        score = 0.5
+        if seal_times <= 1 and open_times == 0:
+            score += 0.3  # 封板稳
+        if seal_amt > 1e8:
+            score += 0.2  # 封单大
+
+        results[code] = min(score, 1.0)
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "cascade_break_crash": '''"""信息瀑布：连板股断板后反向瀑布 → 大幅下跌"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 查炸板池
+        zb = db.query("zb_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if zb.empty:
+            continue
+
+        # 查昨日连板数
+        yesterday = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, yesterday))
+        if zt.empty:
+            continue
+        prev_cons = int(zt.iloc[-1].get("consecutive_zt", 0))
+        if prev_cons < 3:
+            continue
+
+        # 连板>=3 今日炸板 → 高负值
+        results[code] = -0.5 - (prev_cons - 3) * 0.1
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "seal_decay_warning": '''"""信息瀑布：封板单量3日连续下降 → 断板前兆"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 取近3天涨停池数据
+        seals = []
+        for i in range(3):
+            d = (as_of - timedelta(days=i)).strftime("%Y-%m-%d")
+            zt = db.query("zt_pool", as_of,
+                           where="stock_code = ? AND trade_date = ?",
+                           params=(code, d))
+            if zt.empty:
+                break
+            seals.append(float(zt.iloc[-1].get("seal_amount", 0)))
+
+        if len(seals) < 3:
+            continue
+
+        # 3日连续下降 → 负信号
+        if seals[0] > seals[1] > seals[2]:
+            decay_rate = (seals[2] - seals[0]) / seals[0] if seals[0] > 0 else 0
+            results[code] = decay_rate  # 负值越大越危险
+
+    return pd.Series(results, dtype=float)
+''',
+
+            # ── 三班组 ──
+            "small_cap_trap": '''"""三班组：小市值+低换手+无题材连板 → 天地板风险"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 必须是连板股
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if zt.empty:
+            continue
+        cons = int(zt.iloc[-1].get("consecutive_zt", 0))
+        if cons < 3:
+            continue
+
+        # 查换手率
+        price = db.query("daily_price", as_of,
+                          where="stock_code = ? AND trade_date = ?",
+                          params=(code, date_str))
+        if price.empty:
+            continue
+        turnover = float(price.iloc[-1].get("turnover_rate", 0))
+
+        # 查题材
+        concept = db.query("concept_mapping", as_of,
+                            where="stock_code = ?", params=(code,))
+        has_theme = not concept.empty
+
+        # 评分：触发越多越危险（负值）
+        risk_score = 0
+        if turnover < 10:
+            risk_score += 1
+        if not has_theme:
+            risk_score += 1
+
+        if risk_score > 0:
+            results[code] = -risk_score / 2.0  # -0.5 或 -1.0
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "fund_flow_diverge_exit": '''"""三班组：超大单买+大单卖 背离在高位连板 → 出货信号"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 连板>=3
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if zt.empty:
+            continue
+        cons = int(zt.iloc[-1].get("consecutive_zt", 0))
+        if cons < 3:
+            continue
+
+        # 查资金流
+        fund = db.query("fund_flow", as_of,
+                         where="stock_code = ? AND trade_date = ?",
+                         params=(code, date_str))
+        if fund.empty:
+            continue
+        row = fund.iloc[-1]
+        super_large = float(row.get("super_large_net", 0))
+        large = float(row.get("large_net", 0))
+
+        # 超大单净买入 + 大单净卖出 = 背离
+        if super_large > 0 and large < 0:
+            divergence = abs(super_large) / (abs(super_large) + abs(large) + 1)
+            results[code] = -divergence  # 负值
+
+    return pd.Series(results, dtype=float)
+''',
+
+            # ── 题材生命周期 ──
+            "early_theme_alpha": '''"""题材生命周期：题材启动期（1-2日，涨停1-3家）→ 未来5日收益最高"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    # 统计每个题材的涨停家数
+    zt_all = db.query("zt_pool", as_of,
+                       where="trade_date = ?", params=(date_str,))
+    if zt_all.empty:
+        return pd.Series(dtype=float)
+
+    # 统计题材涨停数
+    concept_counts = {}
+    for _, zt_row in zt_all.iterrows():
+        code = zt_row["stock_code"]
+        concepts = db.query("concept_mapping", as_of,
+                             where="stock_code = ?", params=(code,))
+        for _, c_row in concepts.iterrows():
+            cname = c_row["concept_name"]
+            concept_counts.setdefault(cname, []).append(code)
+
+    # 找启动期题材（涨停1-3家，且连续<=2天有涨停）
+    early_themes = set()
+    for cname, codes in concept_counts.items():
+        if 1 <= len(codes) <= 3:
+            early_themes.add(cname)
+
+    if not early_themes:
+        return pd.Series(dtype=float)
+
+    # 给属于启动期题材的股票打分
+    for code in universe:
+        concepts = db.query("concept_mapping", as_of,
+                             where="stock_code = ?", params=(code,))
+        for _, c_row in concepts.iterrows():
+            if c_row["concept_name"] in early_themes:
+                results[code] = 0.7
+                break
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "crowded_theme_decay": '''"""题材生命周期：题材拥挤度>30% → 见顶信号"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    # 全市场涨停数
+    zt_all = db.query("zt_pool", as_of,
+                       where="trade_date = ?", params=(date_str,))
+    if zt_all.empty:
+        return pd.Series(dtype=float)
+
+    total_zt = len(zt_all["stock_code"].unique())
+    if total_zt == 0:
+        return pd.Series(dtype=float)
+
+    # 统计每个题材的涨停占比
+    concept_zt_count = {}
+    for _, zt_row in zt_all.iterrows():
+        code = zt_row["stock_code"]
+        concepts = db.query("concept_mapping", as_of,
+                             where="stock_code = ?", params=(code,))
+        for _, c_row in concepts.iterrows():
+            cname = c_row["concept_name"]
+            concept_zt_count[cname] = concept_zt_count.get(cname, 0) + 1
+
+    # 计算拥挤度
+    theme_crowd = {}
+    for cname, count in concept_zt_count.items():
+        theme_crowd[cname] = count / total_zt
+
+    results = {}
+    for code in universe:
+        concepts = db.query("concept_mapping", as_of,
+                             where="stock_code = ?", params=(code,))
+        max_crowd = 0
+        for _, c_row in concepts.iterrows():
+            cname = c_row["concept_name"]
+            if cname in theme_crowd:
+                max_crowd = max(max_crowd, theme_crowd[cname])
+        if max_crowd > 0:
+            results[code] = -max_crowd if max_crowd > 0.3 else max_crowd
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "narrative_exhaustion": '''"""题材生命周期：龙头高位换手暴增+不创新高 → 出货"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    results = {}
+    for code in universe:
+        # 取近5日行情
+        recent = db.query_range("daily_price", as_of, lookback_days=5)
+        code_recent = recent[recent["stock_code"] == code] if not recent.empty else pd.DataFrame()
+        if len(code_recent) < 3:
+            continue
+
+        # 今日换手率 vs 前5日均值
+        today_turnover = float(code_recent.iloc[-1].get("turnover_rate", 0))
+        avg_turnover = code_recent["turnover_rate"].mean()
+        if avg_turnover == 0:
+            continue
+
+        turnover_ratio = today_turnover / avg_turnover
+        if turnover_ratio < 2.0:
+            continue  # 未暴增
+
+        # 是否创近3日新高
+        recent_highs = code_recent.tail(3)["high"]
+        today_high = float(code_recent.iloc[-1]["high"])
+        if today_high >= recent_highs.max():
+            continue  # 还在创新高
+
+        # 换手暴增 + 不创新高 → 出货信号
+        results[code] = -turnover_ratio / 5.0
+
+    return pd.Series(results, dtype=float)
+''',
+
+            # ── 情绪驱动 ──
+            "strong_emotion_board_alpha": '''"""情绪驱动：涨停>80家 + 连板>=3 → 追高仍有正收益"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    # 全市场涨停数
+    market = db.query("market_emotion", as_of,
+                       where="trade_date = ?", params=(date_str,))
+    if market.empty:
+        return pd.Series(dtype=float)
+
+    zt_count = int(market.iloc[-1].get("zt_count", 0))
+    if zt_count < 80:
+        return pd.Series(dtype=float)  # 情绪不够强
+
+    results = {}
+    for code in universe:
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if zt.empty:
+            continue
+        cons = int(zt.iloc[-1].get("consecutive_zt", 0))
+        if cons >= 3:
+            results[code] = cons / 5.0  # 连板越多越好
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "weak_emotion_avoid": '''"""情绪驱动：涨停<20家 → 任何打板策略负期望"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    market = db.query("market_emotion", as_of,
+                       where="trade_date = ?", params=(date_str,))
+    if market.empty:
+        return pd.Series(dtype=float)
+
+    zt_count = int(market.iloc[-1].get("zt_count", 0))
+    if zt_count >= 20:
+        return pd.Series(dtype=float)  # 情绪不弱
+
+    # 极弱环境：给所有涨停股负分
+    results = {}
+    for code in universe:
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str))
+        if not zt.empty:
+            results[code] = -0.5
+
+    return pd.Series(results, dtype=float)
+''',
+
+            "emotion_reversal": '''"""情绪驱动：连续3日涨停<20家后回升 → 反转机会"""
+def compute(universe, as_of, db):
+    from datetime import timedelta
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    # 取近5日市场情绪
+    zt_counts = []
+    for i in range(5):
+        d = (as_of - timedelta(days=i)).strftime("%Y-%m-%d")
+        market = db.query("market_emotion", as_of,
+                           where="trade_date = ?", params=(d,))
+        if market.empty:
+            zt_counts.append(None)
+        else:
+            zt_counts.append(int(market.iloc[-1].get("zt_count", 0)))
+
+    # 从旧到新：zt_counts[4] ... zt_counts[0]
+    zt_counts.reverse()
+    valid = [x for x in zt_counts if x is not None]
+    if len(valid) < 4:
+        return pd.Series(dtype=float)
+
+    # 前3天都 < 20，第4天开始回升？
+    if not all(v < 20 for v in valid[:3]):
+        return pd.Series(dtype=float)
+
+    if valid[3] <= valid[2]:
+        return pd.Series(dtype=float)  # 还没回升
+
+    # 反转确认：给涨停股正分
+    results = {}
+    date_str_today = as_of.strftime("%Y-%m-%d")
+    for code in universe:
+        zt = db.query("zt_pool", as_of,
+                       where="stock_code = ? AND trade_date = ?",
+                       params=(code, date_str_today))
+        if not zt.empty:
+            results[code] = 0.6
+
+    return pd.Series(results, dtype=float)
+''',
+        }
+
+        if name in templates:
+            return templates[name]
+
+        # ── 非种子假说：基础骨架 ──
         config = candidate.config
         factor_type = config.get("factor_type", "conditional")
+        conditions = config.get("conditions", [])
+        cond_lines = [f"    # condition: {c}" for c in conditions]
+        conditions_str = "\n".join(cond_lines) if cond_lines else "    pass"
 
-        if factor_type == "conditional":
-            conditions = config.get("conditions", [])
-            cond_lines = []
-            for c in conditions:
-                if isinstance(c, dict):
-                    cond_lines.append(f"    # {c}")
-                else:
-                    cond_lines.append(f"    # condition: {c}")
-            conditions_str = "\n".join(cond_lines) if cond_lines else "    pass"
-            return f'''"""Auto-generated factor: {candidate.name}"""
-import pandas as pd
-from src.data.storage import Storage
-
+        return f'''"""Auto-generated factor: {name}"""
 def compute(universe, as_of, db):
     """{config.get("prediction", "")}"""
 {conditions_str}
-    return pd.Series(dtype=float)
-'''
-        else:
-            return f'''"""Auto-generated factor: {candidate.name}"""
-import pandas as pd
-from src.data.storage import Storage
-
-def compute(universe, as_of, db):
-    """{config.get("prediction", "")}"""
-    # expression: {config.get("expression", "N/A")}
     return pd.Series(dtype=float)
 '''
 
@@ -306,40 +702,119 @@ def compute(universe, as_of, db):
     # --------------------------------------------------
 
     def _crossover(self, accepted: list[Candidate]) -> list[Candidate]:
-        """有效因子杂交 — 取两个因子的条件组合。"""
+        """多策略杂交：乘法交叉、条件交叉、互补交叉。"""
         if len(accepted) < 2:
             return []
 
         results = []
-        # 取最近两个验收因子杂交
-        parents = accepted[-2:]
-        p1_config = parents[0].config
-        p2_config = parents[1].config
 
-        hybrid_conditions = []
-        # 父本1的前半条件 + 父本2的后半条件
-        c1 = p1_config.get("conditions", [])
-        c2 = p2_config.get("conditions", [])
-        if c1 and c2:
-            mid1 = max(1, len(c1) // 2)
-            mid2 = max(1, len(c2) // 2)
-            hybrid_conditions = c1[:mid1] + c2[mid2:]
+        # 从验收因子中选多对父本（不止最近2个）
+        # 按来源多样性选择：尽量选不同理论来源的
+        candidates_by_theory = {}
+        for c in accepted:
+            theory = c.config.get("source_theory", "unknown")
+            candidates_by_theory.setdefault(theory, []).append(c)
 
-        if hybrid_conditions:
-            hybrid_name = f"{parents[0].name}_x_{parents[1].name}"
-            results.append(Candidate(
-                name=hybrid_name,
-                source="crossover",
-                config={
-                    "name": hybrid_name,
-                    "factor_type": "conditional",
-                    "conditions": hybrid_conditions,
-                    "parent1": parents[0].name,
-                    "parent2": parents[1].name,
-                },
-            ))
+        # 策略1：条件交叉（不同理论的因子组合条件）
+        if len(candidates_by_theory) >= 2:
+            theory_keys = list(candidates_by_theory.keys())
+            for i in range(min(3, len(theory_keys))):
+                for j in range(i + 1, min(4, len(theory_keys))):
+                    p1 = candidates_by_theory[theory_keys[i]][-1]
+                    p2 = candidates_by_theory[theory_keys[j]][-1]
+                    child = self._crossover_conditions(p1, p2)
+                    if child:
+                        results.append(child)
 
-        return results
+        # 策略2：乘法交叉（两个因子值相乘）
+        if len(accepted) >= 2:
+            p1, p2 = accepted[-2], accepted[-1]
+            child = self._crossover_multiply(p1, p2)
+            if child:
+                results.append(child)
+
+        # 策略3：互补交叉（一个因子的输出作为另一个因子的输入条件）
+        if len(accepted) >= 2:
+            p1, p2 = accepted[-2], accepted[-1]
+            child = self._crossover_complement(p1, p2)
+            if child:
+                results.append(child)
+
+        return results[:5]  # 限制数量
+
+    def _crossover_conditions(self, p1: Candidate, p2: Candidate) -> Candidate | None:
+        """条件交叉：从两个因子中各取部分条件组合。"""
+        c1 = p1.config.get("conditions", [])
+        c2 = p2.config.get("conditions", [])
+        if not c1 or not c2:
+            return None
+
+        # 各取一半条件
+        mid1 = max(1, len(c1) // 2)
+        mid2 = max(1, len(c2) // 2)
+        hybrid_conditions = c1[:mid1] + c2[mid2:]
+
+        if not hybrid_conditions:
+            return None
+
+        hybrid_name = f"{p1.name}_cond_{p2.name}"
+        return Candidate(
+            name=hybrid_name,
+            source="crossover_cond",
+            config={
+                "name": hybrid_name,
+                "factor_type": "conditional",
+                "conditions": hybrid_conditions,
+                "parent1": p1.name,
+                "parent2": p2.name,
+                "crossover_strategy": "condition_splice",
+                "source_theory": f"{p1.config.get('source_theory', '')}+{p2.config.get('source_theory', '')}",
+            },
+        )
+
+    def _crossover_multiply(self, p1: Candidate, p2: Candidate) -> Candidate | None:
+        """乘法交叉：两个因子值的乘积。"""
+        expr1 = p1.config.get("expression") or p1.config.get("name")
+        expr2 = p2.config.get("expression") or p2.config.get("name")
+        if not expr1 or not expr2:
+            return None
+
+        hybrid_name = f"{p1.name}_mul_{p2.name}"
+        return Candidate(
+            name=hybrid_name,
+            source="crossover_mul",
+            config={
+                "name": hybrid_name,
+                "factor_type": "formula",
+                "expression": f"({expr1}) * ({expr2})",
+                "parent1": p1.name,
+                "parent2": p2.name,
+                "crossover_strategy": "multiply",
+                "source_theory": f"{p1.config.get('source_theory', '')}+{p2.config.get('source_theory', '')}",
+                "target": p1.config.get("target", "次日收益率"),
+            },
+        )
+
+    def _crossover_complement(self, p1: Candidate, p2: Candidate) -> Candidate | None:
+        """互补交叉：p1 的输出作为 p2 的输入条件（链式因子）。"""
+        hybrid_name = f"{p1.name}_then_{p2.name}"
+        conditions_p2 = p2.config.get("conditions", [])
+
+        return Candidate(
+            name=hybrid_name,
+            source="crossover_chain",
+            config={
+                "name": hybrid_name,
+                "factor_type": "conditional",
+                "conditions": conditions_p2,
+                "pre_filter": p1.name,  # 先用 p1 筛选，再用 p2 的条件
+                "parent1": p1.name,
+                "parent2": p2.name,
+                "crossover_strategy": "chain",
+                "source_theory": f"{p1.config.get('source_theory', '')}→{p2.config.get('source_theory', '')}",
+                "target": p2.config.get("target", "次日收益率"),
+            },
+        )
 
     # --------------------------------------------------
     # 日志

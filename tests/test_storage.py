@@ -35,6 +35,32 @@ class TestInitDb:
         assert "factor_values" in table_names
         assert "ic_series" in table_names
         assert "mining_log" in table_names
+        assert "market_scripts" in table_names
+
+
+class TestSchemaMigration:
+    def test_news_table_has_new_columns(self, tmp_db):
+        """init_db 后 news 表应有 news_type 和 classify_confidence 列。"""
+        import sqlite3
+        conn = tmp_db._get_conn()
+        try:
+            cols = [row["name"] for row in conn.execute("PRAGMA table_info(news)")]
+            assert "news_type" in cols
+            assert "classify_confidence" in cols
+        finally:
+            conn.close()
+
+    def test_init_db_idempotent(self, tmp_db):
+        """多次调用 init_db 不报错（ALTER TABLE 幂等）。"""
+        tmp_db.init_db()
+        tmp_db.init_db()
+
+    def test_market_scripts_table_exists(self, tmp_db):
+        """market_scripts 表存在。"""
+        tables = tmp_db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='market_scripts'"
+        )
+        assert len(list(tables)) == 1
 
 
 class TestInsert:

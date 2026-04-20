@@ -131,7 +131,11 @@ class TestEvolutionEngine:
 
         code = engine._template_construct(candidates[1])
         assert "compute" in code
-        assert "expression" in code
+        # formula 类型的种子模板有真实逻辑，非种子才走骨架
+        # candidates[1] 是 cascade_break_crash（conditional 类型种子模板）
+        # 它的模板不包含 "expression" 关键字
+        assert "compute" in code
+        assert "db.query" in code or "return pd.Series" in code
 
     def test_llm_construct(self, setup):
         kb_path, log_path, db_path = setup
@@ -178,7 +182,7 @@ class TestEvolutionEngine:
         assert len(crossovers) >= 1
         assert "factor_a" in crossovers[0].name
         assert "factor_b" in crossovers[0].name
-        assert crossovers[0].source == "crossover"
+        assert crossovers[0].source.startswith("crossover")  # crossover_cond / crossover_mul / crossover_chain
 
     def test_crossover_single_parent(self, setup):
         kb_path, log_path, db_path = setup

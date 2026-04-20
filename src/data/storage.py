@@ -34,6 +34,15 @@ class Storage:
         conn = self._get_conn()
         try:
             conn.executescript(schema_sql)
+            # 为 news 表新增 news_type / classify_confidence 列（幂等）
+            for stmt in [
+                "ALTER TABLE news ADD COLUMN news_type TEXT DEFAULT 'noise'",
+                "ALTER TABLE news ADD COLUMN classify_confidence REAL DEFAULT 0.0",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             conn.commit()
         finally:
             conn.close()

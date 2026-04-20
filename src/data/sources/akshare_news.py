@@ -60,6 +60,9 @@ def fetch(stock_code: str = "", trade_date: str = "", retries: int = 3) -> pd.Da
             # 情感分析（snownlp）
             result["sentiment_score"] = result["content"].apply(_sentiment)
 
+            # 新闻分类（规则引擎，不调 LLM）
+            _classify_news_inplace(result)
+
             # 过滤日期
             if trade_date:
                 result["publish_time"] = pd.to_datetime(result["publish_time"], errors="coerce")
@@ -95,3 +98,22 @@ def save(df: pd.DataFrame, db: Storage) -> int:
     if df.empty:
         return 0
     return db.insert("news", df)
+
+
+def _classify_news_inplace(df: pd.DataFrame) -> None:
+    """对新闻 DataFrame 就地填充 news_type 和 classify_confidence。"""
+    from src.narrative.news_classifier import NewsClassifier
+
+    clf = NewsClassifier()  # 不传 llm_client，采集时只用规则引擎
+    news_types = []
+    confidences = []
+    for _, row in df.iterrows():
+        result = clf.classify(
+            title=str(row.get("title", "")),
+            content=str(row.get("content", "")),
+            stock_code=str(row.get("stock_code", "")),
+        )
+        news_types.append(result.news_type.value)
+        confidences.append(result.confidence)
+    df["news_type"] = news_types
+    df["classify_confidence"] = confidences

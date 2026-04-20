@@ -93,6 +93,73 @@ class TestNarrativeVelocity:
         assert result["000002"] == 0.0
 
 
+class TestNarrativeVelocityWeighted:
+    """V2 加权模式测试。"""
+
+    def test_weighted_mode_with_news_type(self, tmp_path):
+        """有 news_type 列时使用加权模式。"""
+        storage = Storage(str(tmp_path / "test.db"))
+        storage.init_db()
+
+        DATE = "2024-06-14"
+        PREV = "2024-06-11"
+        SNAP = datetime(2024, 6, 13, 10, 0, 0)
+        AS_OF = datetime(2024, 6, 14, 15, 0, 0)
+
+        # 今日新闻：000001 有 theme_ignite(3.0) + noise(0.0) = 3.0
+        storage.insert("news", pd.DataFrame([
+            {"news_id": "w1", "stock_code": "000001", "title": "AI首次突破",
+             "publish_time": DATE, "content": "", "sentiment_score": 0.8,
+             "news_type": "theme_ignite", "classify_confidence": 0.9},
+            {"news_id": "w2", "stock_code": "000001", "title": "日常报道",
+             "publish_time": DATE, "content": "", "sentiment_score": 0.5,
+             "news_type": "noise", "classify_confidence": 0.3},
+        ]), snapshot_time=SNAP)
+
+        # 3天前：000001 有 catalyst_expect(1.0) = 1.0
+        storage.insert("news", pd.DataFrame([
+            {"news_id": "w3", "stock_code": "000001", "title": "AI有望突破",
+             "publish_time": PREV, "content": "", "sentiment_score": 0.6,
+             "news_type": "catalyst_expect", "classify_confidence": 0.7},
+        ]), snapshot_time=SNAP)
+
+        factor = NarrativeVelocityFactor()
+        result = factor.compute(["000001"], AS_OF, storage)
+
+        # today=3.0, prev=1.0, velocity=(3.0-1.0)/1.0 = 2.0, clamped to 1.0
+        assert result["000001"] == 1.0
+
+    def test_negative_type_reduces_score(self, tmp_path):
+        """negative 类型产生负分。"""
+        storage = Storage(str(tmp_path / "test.db"))
+        storage.init_db()
+
+        DATE = "2024-06-14"
+        PREV = "2024-06-11"
+        SNAP = datetime(2024, 6, 13, 10, 0, 0)
+        AS_OF = datetime(2024, 6, 14, 15, 0, 0)
+
+        # 今日：negative(-2.0)
+        storage.insert("news", pd.DataFrame([
+            {"news_id": "n1", "stock_code": "000001", "title": "公司被处罚",
+             "publish_time": DATE, "content": "", "sentiment_score": 0.1,
+             "news_type": "negative", "classify_confidence": 0.9},
+        ]), snapshot_time=SNAP)
+
+        # 3天前：catalyst_real(2.0)
+        storage.insert("news", pd.DataFrame([
+            {"news_id": "n2", "stock_code": "000001", "title": "中标大单",
+             "publish_time": PREV, "content": "", "sentiment_score": 0.9,
+             "news_type": "catalyst_real", "classify_confidence": 0.8},
+        ]), snapshot_time=SNAP)
+
+        factor = NarrativeVelocityFactor()
+        result = factor.compute(["000001"], AS_OF, storage)
+
+        # today=-2.0, prev=2.0, velocity=(-2.0-2.0)/2.0 = -2.0, clamped to -1.0
+        assert result["000001"] == -1.0
+
+
 class TestThemeCrowding:
     def test_basic(self, db):
         factor = ThemeCrowdingFactor()

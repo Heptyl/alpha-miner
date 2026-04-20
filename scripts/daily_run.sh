@@ -11,24 +11,32 @@ DATE=$(date +%Y-%m-%d)
 echo "===== Alpha Miner Daily Run: $DATE ====="
 echo ""
 
-echo "[1/5] 采集数据..."
+echo "[1/7] 采集数据..."
 python -m cli.collect --today
 echo ""
 
-echo "[2/5] 计算因子值..."
+echo "[2/7] 计算因子值..."
 python -m cli.backtest --compute-today
 echo ""
 
-echo "[3/5] 漂移检测..."
+echo "[3/7] 漂移检测..."
 python -m cli.drift --date $DATE
 echo ""
 
-echo "[4/5] 因子进化..."
+echo "[4/7] 因子进化..."
 python -m cli.mine evolve --generations 3 --population 5
 echo ""
 
-echo "[5/5] 生成日报..."
+echo "[5/7] 生成日报..."
 python -m cli.report --date $DATE
+echo ""
+
+echo "[6/7] 生成市场剧本..."
+python -m cli script --date $DATE --save
+echo ""
+
+echo "[7/7] 复盘昨日剧本..."
+python -m cli replay --date $DATE --save
 echo ""
 
 echo "===== Done: $DATE ====="

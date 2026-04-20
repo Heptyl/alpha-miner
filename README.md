@@ -7,15 +7,15 @@
 ```
 alpha-miner/
 ├── cli/                    # CLI 命令入口 (python -m cli <command>)
-│   ├── __main__.py         #   子命令路由 (collect / report / mine / drift / backtest)
+│   ├── __main__.py         #   子命令路由 (collect / report / mine / drift / backtest / script / replay)
 │   ├── collect.py          #   数据采集
-│   ├── report.py           #   日报 + 盘后决策简报 (--brief)
+│   ├── report.py           #   日报 + 盘后决策简报 + 市场剧本 + 复盘
 │   ├── mine.py             #   因子进化挖掘 (LLM 驱动)
 │   ├── drift.py            #   漂移报告
 │   └── backtest.py         #   单因子回测
 ├── src/
 │   ├── data/               # 数据层
-│   │   ├── schema.sql      #   SQLite 表结构 (20+ 表)
+│   │   ├── schema.sql      #   SQLite 表结构 (17 张表)
 │   │   ├── storage.py      #   Storage: 时间隔离查询、快照管理
 │   │   ├── collector.py    #   CollectorManager 调度器
 │   │   └── sources/        #   采集器 (akshare)
@@ -24,7 +24,7 @@ alpha-miner/
 │   │       ├── akshare_lhb.py         #  龙虎榜
 │   │       ├── akshare_fund_flow.py   #  资金流向
 │   │       ├── akshare_concept.py     #  概念板块
-│   │       └── akshare_news.py        #  新闻 + 金融情感引擎
+│   │       └── akshare_news.py        #  新闻 + 金融情感引擎 + 自动分类
 │   ├── factors/            # 因子库 (9 因子)
 │   │   ├── base.py         #   BaseFactor / ConditionalFactor / CrossFactor
 │   │   ├── registry.py     #   FactorRegistry 自动注册
@@ -36,9 +36,17 @@ alpha-miner/
 │   │   │   └── lhb_institution.py       # 龙虎榜机构净买入
 │   │   └── narrative/      #   叙事因子 (4)
 │   │       ├── theme_lifecycle.py       # 题材生命周期 (萌芽→爆发→衰退)
-│   │       ├── narrative_velocity.py    # 新闻数量 3 日变化率
+│   │       ├── narrative_velocity.py    # 新闻加权 3 日变化率 (V2: 类型加权)
 │   │       ├── theme_crowding.py        # 题材拥挤度 (反拥挤)
 │   │       └── leader_clarity.py        # 龙头清晰度
+│   ├── narrative/           # 叙事引擎 (Phase 3)
+│   │   ├── news_classifier.py          #  新闻分类器 (规则+LLM, 7 类)
+│   │   ├── script_engine.py            #  市场剧本引擎
+│   │   ├── replay_engine.py            #  复盘引擎
+│   │   └── prompts/                    #  LLM Prompt 模板
+│   │       ├── market_script.md        #  剧本生成
+│   │       ├── replay.md               #  复盘分析
+│   │       └── news_classify.md        #  新闻分类
 │   ├── drift/              # 漂移检测 + 决策输出
 │   │   ├── ic_tracker.py   #   IC 追踪: Spearman IC / ICIR / 胜率 / 盈亏比
 │   │   ├── cusum.py        #   CUSUM 变点检测 (递归)
@@ -59,7 +67,7 @@ alpha-miner/
 ├── knowledge_base/         # 知识库
 │   └── theories.yaml       #   行为金融学理论库 (前景理论/信息瀑布/羊群效应等)
 ├── reports/                # 产出报告 [调试阶段，后续加入 .gitignore]
-├── tests/                  # 69 tests
+├── tests/                  # 105 tests
 └── pyproject.toml          # uv 项目配置
 ```
 
@@ -80,9 +88,58 @@ alpha-miner/
 | 因子 | 级别 | 逻辑 |
 |------|------|------|
 | theme_lifecycle | 股票 | 题材涨停数阶段判断 (萌芽→爆发→衰退) |
-| narrative_velocity | 股票 | 今日新闻数 / 3 日前新闻数 - 1 |
+| narrative_velocity | 股票 | 新闻类型加权 3 日变化率（V2: 7 类加权） |
 | theme_crowding | 股票 | 1 - max(题材涨停占比 × 5)，反拥挤 |
 | leader_clarity | 股票 | 题材内龙头成交额 / 第二名成交额 |
+
+## 叙事引擎 (Phase 3)
+
+### 新闻分类器
+
+7 类新闻标签，规则引擎优先 + LLM fallback：
+
+| 类型 | 权重 | 说明 |
+|------|------|------|
+| theme_ignite | 3.0 | 题材点燃（政策/技术突破） |
+| catalyst_real | 2.0 | 实质性催化剂（业绩/中标） |
+| theme_ferment | 1.5 | 题材发酵（讨论增多） |
+| catalyst_expect | 1.0 | 预期性催化剂 |
+| good_realize | -0.5 | 利好兑现（见光死） |
+| negative | -2.0 | 负面事件 |
+| noise | 0.0 | 无关噪音 |
+
+采集新闻时自动分类，填充 `news_type` + `classify_confidence` 列。
+
+### 市场剧本引擎
+
+每日生成结构化剧本：
+
+- **市场快照**：regime、涨停/跌停、连板梯队、热门题材、龙虎榜、资金流向
+- **题材判定**：每个热门题材的生命周期阶段 + 操作判定
+- **明日策略**：关注/回避列表 + 仓位建议
+- **风险提示**：情绪极端、题材拥挤等
+
+```bash
+python -m cli script --date 2024-06-15          # 规则版（默认）
+python -m cli script --date 2024-06-15 --llm     # LLM 增强版
+python -m cli script --date 2024-06-15 --save    # 存入数据库
+```
+
+### 复盘引擎
+
+对比昨日剧本预测 vs 今日实际：
+
+- **regime 准确率**：昨日预测的 regime 是否命中
+- **题材命中/错过**：关注列表中哪些题材今日爆发
+- **异常事件检测**：极端牛市、恐慌性抛售、冰点行情
+- **教训 + 调整建议**
+
+```bash
+python -m cli replay --date 2024-06-16          # 复盘
+python -m cli replay --date 2024-06-16 --llm     # LLM 增强复盘
+python -m cli replay --date 2024-06-16 --save    # 存入数据库
+python -m cli replay --stats                      # 准确率统计
+```
 
 ## 进化引擎
 
@@ -102,7 +159,7 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 失败分析 → 变异 → 重试
 ```
 
-- LLM 接口：Z.AI Anthropic 兼容端点 (`claude-3-5-sonnet`)
+- LLM 接口：Z.AI Anthropic 兼容端点 (`glm-4-plus`)
 - 沙箱：子进程隔离执行，预注入 `pd/datetime/Storage`
 - Prompt 模板：`explore` → `construct` → `analyze` 三阶段
 
@@ -154,6 +211,10 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 | CUSUM | 递归变点检测，识别因子 IC 结构性断裂 |
 | Regime | 市场状态分类 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
+## 数据库 (17 张表)
+
+daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mapping, concept_daily, news, market_emotion, factor_values, ic_series, drift_events, regime_state, mining_log, market_scripts, replay_log
+
 ## 技术要点
 
 - **时间隔离**: Storage 层严格按 snapshot_time 隔离，因子计算只看到 as_of 之前的数据，杜绝未来函数
@@ -161,6 +222,8 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 - **CUSUM 变点**: 递归分割 + 标准化累积偏差，阈值可调
 - **市场状态**: 多信号投票，置信度最高的 regime 胜出
 - **情感引擎**: 金融关键词规则引擎替代 snownlp，针对 A 股语料优化
+- **新闻分类**: 规则引擎 + LLM fallback，高置信度跳过 LLM 节省成本
+- **LLM 可选**: 所有模块 llm_client=None 时走规则路径，系统照常运行
 - **LLM Client**: 三级 fallback (env → openclaw.json → hermes auth.json)
 
 ## Quick Start
@@ -169,22 +232,27 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 # 安装
 uv sync
 
-# 跑测试 (69 tests)
+# 跑测试 (105 tests)
 uv run pytest tests/ -v -m "not live"
 
-# 采集数据
-uv run python -m cli collect --today
-uv run python -m cli collect --backfill --start 2024-01-01
+# 每日完整流程 (7 步)
+bash scripts/daily_run.sh
 
-# 因子进化挖掘
-uv run python -m cli mine evolve --generations 3 --population 5
+# 分步执行
+uv run python -m cli collect --today             # 1. 采集数据
+uv run python -m cli backtest --compute-today     # 2. 计算因子
+uv run python -m cli drift --date $DATE           # 3. 漂移检测
+uv run python -m cli mine evolve                  # 4. 因子进化
+uv run python -m cli report --date $DATE          # 5. 日报
+uv run python -m cli script --date $DATE --save   # 6. 市场剧本
+uv run python -m cli replay --date $DATE --save   # 7. 复盘
 
 # 盘后决策简报
 uv run python -m cli report --brief
 uv run python -m cli report --brief --holdings 000001,600519 --top 5
 
-# 漂移报告
-uv run python -m cli drift --date 2024-06-15
+# 复盘统计
+uv run python -m cli replay --stats
 ```
 
 ## 项目文件
@@ -193,6 +261,7 @@ uv run python -m cli drift --date 2024-06-15
 |------|------|
 | `alpha-miner-steps-wsl2.md` | 原始开发步骤记录 |
 | `factor-mining-v2.md` | 进化引擎设计文档 |
+| `narrative-strategy-upgrade.md` | 叙事引擎设计文档 (Phase 3) |
 | `BUILD_LOG.md` | 构建日志 |
 | `CLAUDE.md` | Claude Code 协作指南 |
 
@@ -201,7 +270,7 @@ uv run python -m cli drift --date 2024-06-15
 - [ ] 数据自动填充（交易日 15:40 后 cron 采集）
 - [ ] 因子 IC 实盘验证（当前 DB 空，需数据积累）
 - [ ] 历史相似形态胜率（交付物二的补充）
-- [ ] Web UI（当前 CLI 输出，后续 Excaildraw 可视化）
+- [ ] Web UI（当前 CLI 输出，后续 Excalidraw 可视化）
 - [ ] Telegram 推送集成
 
 ## License
