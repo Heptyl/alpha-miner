@@ -1,6 +1,8 @@
-"""新闻采集 — akshare stock_news_em + snownlp 情感分析。"""
+"""新闻采集 — akshare stock_news_em + 金融关键词规则引擎情感分析。"""
 
 import hashlib
+import sys
+import os
 import time
 from datetime import datetime
 
@@ -8,6 +10,10 @@ import akshare as ak
 import pandas as pd
 
 from src.data.storage import Storage
+
+# 复用 a-share-sentiment 的金融情感引擎
+sys.path.insert(0, os.path.expanduser("~/a-share-sentiment/scripts"))
+from fin_sentiment import analyze_sentiment as _fin_analyze
 
 
 def _make_news_id(title: str, publish_time: str) -> str:
@@ -74,12 +80,12 @@ def fetch(stock_code: str = "", trade_date: str = "", retries: int = 3) -> pd.Da
 
 
 def _sentiment(text: str) -> float:
-    """用 snownlp 计算情感分数。"""
+    """用金融关键词规则引擎计算情感分数（替代 snownlp）。"""
     try:
-        from snownlp import SnowNLP
         if not text or len(text) < 2:
             return 0.5
-        return SnowNLP(text).sentiments
+        result = _fin_analyze(text)
+        return result["score"]
     except Exception:
         return 0.5
 

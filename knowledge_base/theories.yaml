@@ -1,4 +1,5 @@
-# 因子挖掘知识库 — 从行为金融学和实盘认知提取的假说种子
+# knowledge_base/theories.yaml
+# 因子挖掘知识库 — 4个理论、12个可测试假说
 
 theories:
   - id: info_cascade

@@ -21,16 +21,64 @@ from src.mining.failure_analyzer import FailureAnalyzer
 from src.mining.mutator import FactorMutator
 
 
+def _build_llm_client():
+    """构建 LLM client，优先 Z.AI Anthropic 兼容接口。"""
+    import os
+
+    # 1) 环境变量
+    api_key = os.environ.get("GLM_API_KEY") or os.environ.get("ZAI_API_KEY")
+    if api_key:
+        try:
+            import anthropic
+            return anthropic.Anthropic(
+                api_key=api_key,
+                base_url="https://open.bigmodel.cn/api/anthropic",
+            ), "Z.AI (env)"
+        except ImportError:
+            pass
+
+    # 2) openclaw.json
+    try:
+        import json as _json
+        oc = _json.load(open(os.path.expanduser("~/.openclaw/openclaw.json")))
+        api_key = oc.get("env", {}).get("ZAI_API_KEY")
+        if api_key:
+            import anthropic
+            return anthropic.Anthropic(
+                api_key=api_key,
+                base_url="https://open.bigmodel.cn/api/anthropic",
+            ), "Z.AI (openclaw.json)"
+    except Exception:
+        pass
+
+    # 3) hermes auth.json
+    try:
+        import json as _json
+        auth = _json.load(open(os.path.expanduser("~/.hermes/auth.json")))
+        pool = auth.get("credential_pool", {}).get("zai", [])
+        if pool:
+            cred = pool[0]
+            api_key = cred.get("access_token")
+            base_url = cred.get("base_url", "https://open.bigmodel.cn/api/anthropic")
+            if api_key:
+                import anthropic
+                return anthropic.Anthropic(
+                    api_key=api_key,
+                    base_url=base_url,
+                ), f"Z.AI ({cred.get('label', 'auth.json')})"
+    except Exception:
+        pass
+
+    return None, None
+
+
 def cmd_evolve(args):
     """完整进化循环。"""
-    # 尝试加载 Anthropic client
-    api_client = None
-    try:
-        import anthropic
-        api_client = anthropic.Anthropic()
-        print("[INFO] Anthropic API 已连接")
-    except Exception:
-        print("[INFO] 无 Anthropic API，使用模板生成")
+    api_client, source = _build_llm_client()
+    if api_client:
+        print(f"[INFO] LLM 已连接: {source}")
+    else:
+        print("[INFO] 无 LLM 可用，使用模板生成")
 
     engine = EvolutionEngine(
         db_path=args.db,
