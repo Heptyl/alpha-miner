@@ -34,6 +34,16 @@ class Storage:
         conn = self._get_conn()
         try:
             conn.executescript(schema_sql)
+            # 为 market_emotion 新增活跃度/涨跌家数列（幂等）
+            for stmt in [
+                "ALTER TABLE market_emotion ADD COLUMN up_count INTEGER DEFAULT 0",
+                "ALTER TABLE market_emotion ADD COLUMN down_count INTEGER DEFAULT 0",
+                "ALTER TABLE market_emotion ADD COLUMN activity TEXT DEFAULT '0%'",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             # 为 news 表新增 news_type / classify_confidence 列（幂等）
             for stmt in [
                 "ALTER TABLE news ADD COLUMN news_type TEXT DEFAULT 'noise'",

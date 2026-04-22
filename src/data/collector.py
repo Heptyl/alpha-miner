@@ -1,13 +1,15 @@
 """数据采集调度器 — 统一调用各数据源，单源失败不影响整体。
 
 采集完成后自动聚合：
-- market_emotion：涨停数、跌停数、最高板、情绪级别
+- market_emotion：涨停数、跌停数、最高板、情绪级别（乐股源直取）
 - concept_daily：每个概念当日涨停数、龙头等
 """
 
+import logging
 from datetime import datetime
 from typing import Optional
 
+import akshare as ak
 import pandas as pd
 
 from src.data.storage import Storage
@@ -19,6 +21,8 @@ from src.data.sources import (
     akshare_concept,
     akshare_news,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "today") -> dict[str, int]:
@@ -41,7 +45,45 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
 
     results = {}
 
-    # 1. 日K线 — today 模式用实时行情, backfill 模式用历史日K线
+    # 0. 涨停池、炸板池、强势股、龙虎榜（轻量接口，先采集）
+    #    daily_price 需要从这些表获取重点股票代码
+    try:
+        df = akshare_zt_pool.fetch_zt_pool(trade_date)
+        count = akshare_zt_pool.save_zt_pool(df, db)
+        results["zt_pool"] = count
+        print(f"  [OK] zt_pool: {count} rows")
+    except Exception as e:
+        results["zt_pool"] = 0
+        print(f"  [FAIL] zt_pool: {e}")
+
+    try:
+        df = akshare_zt_pool.fetch_zb_pool(trade_date)
+        count = akshare_zt_pool.save_zb_pool(df, db)
+        results["zb_pool"] = count
+        print(f"  [OK] zb_pool: {count} rows")
+    except Exception as e:
+        results["zb_pool"] = 0
+        print(f"  [FAIL] zb_pool: {e}")
+
+    try:
+        df = akshare_zt_pool.fetch_strong_pool(trade_date)
+        count = akshare_zt_pool.save_strong_pool(df, db)
+        results["strong_pool"] = count
+        print(f"  [OK] strong_pool: {count} rows")
+    except Exception as e:
+        results["strong_pool"] = 0
+        print(f"  [FAIL] strong_pool: {e}")
+
+    try:
+        df = akshare_lhb.fetch(trade_date)
+        count = akshare_lhb.save(df, db)
+        results["lhb_detail"] = count
+        print(f"  [OK] lhb_detail: {count} rows")
+    except Exception as e:
+        results["lhb_detail"] = 0
+        print(f"  [FAIL] lhb_detail: {e}")
+
+    # 1. 日K线 — today 模式只拉重点股票(涨停+强势+龙虎榜), backfill 模式全量
     try:
         if mode == "backfill":
             df = akshare_price.fetch_history(trade_date)
@@ -53,46 +95,6 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
     except Exception as e:
         results["daily_price"] = 0
         print(f"  [FAIL] daily_price: {e}")
-
-    # 2. 涨停池
-    try:
-        df = akshare_zt_pool.fetch_zt_pool(trade_date)
-        count = akshare_zt_pool.save_zt_pool(df, db)
-        results["zt_pool"] = count
-        print(f"  [OK] zt_pool: {count} rows")
-    except Exception as e:
-        results["zt_pool"] = 0
-        print(f"  [FAIL] zt_pool: {e}")
-
-    # 3. 炸板池
-    try:
-        df = akshare_zt_pool.fetch_zb_pool(trade_date)
-        count = akshare_zt_pool.save_zb_pool(df, db)
-        results["zb_pool"] = count
-        print(f"  [OK] zb_pool: {count} rows")
-    except Exception as e:
-        results["zb_pool"] = 0
-        print(f"  [FAIL] zb_pool: {e}")
-
-    # 4. 强势股
-    try:
-        df = akshare_zt_pool.fetch_strong_pool(trade_date)
-        count = akshare_zt_pool.save_strong_pool(df, db)
-        results["strong_pool"] = count
-        print(f"  [OK] strong_pool: {count} rows")
-    except Exception as e:
-        results["strong_pool"] = 0
-        print(f"  [FAIL] strong_pool: {e}")
-
-    # 5. 龙虎榜
-    try:
-        df = akshare_lhb.fetch(trade_date)
-        count = akshare_lhb.save(df, db)
-        results["lhb_detail"] = count
-        print(f"  [OK] lhb_detail: {count} rows")
-    except Exception as e:
-        results["lhb_detail"] = 0
-        print(f"  [FAIL] lhb_detail: {e}")
 
     # 6. 资金流向
     try:
@@ -142,55 +144,57 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
 
 
 def _aggregate_market_emotion(trade_date: str, db: Storage) -> None:
-    """从 zt_pool + daily_price 数据聚合市场情绪。"""
-    zt_df = db.query(
-        "zt_pool",
-        datetime(2099, 1, 1),
-        where="trade_date = ?",
-        params=(trade_date,),
-    )
-    zb_df = db.query(
-        "zb_pool",
-        datetime(2099, 1, 1),
-        where="trade_date = ?",
-        params=(trade_date,),
-    )
+    """聚合市场情绪 — 优先 stock_market_activity_legu 直取，回退 DB 聚合。
 
-    zt_count = len(zt_df) if not zt_df.empty else 0
+    stock_market_activity_legu (乐股源) 提供：真实涨停/跌停数、活跃度，
+    比从 daily_price 计算更准确，且不依赖 spot_em 全量数据。
+    """
+    zt_count, dt_count, activity, up_count, down_count = 0, 0, "0%", 0, 0
 
-    # 跌停数：从 daily_price 筛选 pct_change < -9.5%（考虑四舍五入）
-    price_df = db.query(
-        "daily_price",
-        datetime(2099, 1, 1),
-        where="trade_date = ?",
-        params=(trade_date,),
-    )
-    dt_count = 0
-    if not price_df.empty and "close" in price_df.columns:
-        # 需要前一日收盘价计算跌幅
-        # 用 pct_change 列（如果有），否则从 open/close 近似
-        if "pct_change" in price_df.columns:
-            dt_count = int((pd.to_numeric(price_df["pct_change"], errors="coerce") < -9.5).sum())
-        elif "open" in price_df.columns:
-            # 近似：close/open < 0.905 视为跌停（不太精确但可用）
-            ratio = price_df["close"] / price_df["open"].replace(0, float("nan"))
-            dt_count = int((ratio < 0.905).sum())
+    # 主源：乐股直取
+    try:
+        ma_df = ak.stock_market_activity_legu()
+        if ma_df is not None and not ma_df.empty:
+            data = dict(zip(ma_df["item"], ma_df["value"]))
+            zt_count = int(data.get("真实涨停", 0) or 0)
+            dt_count = int(data.get("真实跌停", 0) or 0)
+            activity = str(data.get("活跃度", "0%"))
+            up_count = int(data.get("上涨", 0) or 0)
+            down_count = int(data.get("下跌", 0) or 0)
+            logger.info("market_emotion: 乐股源 zt=%d dt=%d activity=%s", zt_count, dt_count, activity)
+    except Exception as e:
+        logger.warning("stock_market_activity_legu 失败，回退 DB 聚合: %s", e)
 
-    zb_count = len(zb_df) if not zb_df.empty else 0
+    # 回退：从 DB zt_pool 聚合
+    if zt_count == 0 and dt_count == 0:
+        try:
+            zt_df = db.query("zt_pool", datetime(2099, 1, 1), where="trade_date = ?", params=(trade_date,))
+            zb_df = db.query("zb_pool", datetime(2099, 1, 1), where="trade_date = ?", params=(trade_date,))
+            zt_count = len(zt_df) if not zt_df.empty else 0
+            zb_count = len(zb_df) if not zb_df.empty else 0
+            logger.info("market_emotion: DB 回退 zt=%d zb=%d", zt_count, zb_count)
+        except Exception as e:
+            logger.warning("market_emotion DB 回退也失败: %s", e)
 
-    # 最高连板
+    # 最高连板：从 zt_pool 获取
     highest_board = 0
-    if not zt_df.empty and "consecutive_zt" in zt_df.columns:
-        highest_board = int(zt_df["consecutive_zt"].max())
+    try:
+        zt_df = db.query("zt_pool", datetime(2099, 1, 1), where="trade_date = ?", params=(trade_date,))
+        if not zt_df.empty and "consecutive_zt" in zt_df.columns:
+            highest_board = int(zt_df["consecutive_zt"].max())
+    except Exception:
+        pass
 
-    # 情绪级别
     sentiment_level = _classify_sentiment(zt_count, dt_count, highest_board)
 
     emotion_df = pd.DataFrame([{
         "trade_date": trade_date,
         "zt_count": zt_count,
         "dt_count": dt_count,
+        "up_count": up_count,
+        "down_count": down_count,
         "highest_board": highest_board,
+        "activity": activity,
         "sentiment_level": sentiment_level,
     }])
     db.insert("market_emotion", emotion_df)

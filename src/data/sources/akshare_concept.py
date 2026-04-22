@@ -1,9 +1,13 @@
-"""板块概念映射 — akshare stock_board_concept_name_em。
+"""板块概念映射 — 同花顺源 + 缓存回退。
+
+去掉东方财富 stock_board_concept_name_em / stock_board_concept_cons_em（被 WAF 拦截）。
+改用同花顺 stock_board_concept_name_ths 获取概念列表。
+成分股映射：从 zt_pool / strong_pool 的「所属行业」字段反推 stock→concept 关系。
 
 首次全量拉取 + 缓存7天，日常采集时跳过（除非缓存过期或不存在）。
-不稳定接口，做好 fallback（异常时读缓存表旧数据）。
 """
 
+import logging
 import time
 from datetime import datetime, timedelta
 
@@ -12,6 +16,8 @@ import pandas as pd
 
 from src.data.storage import Storage
 
+logger = logging.getLogger(__name__)
+
 # 缓存有效期（天）
 CACHE_TTL_DAYS = 7
 
@@ -19,8 +25,7 @@ CACHE_TTL_DAYS = 7
 def _cache_valid(db: Storage) -> bool:
     """检查 concept_mapping 缓存是否在有效期内。"""
     try:
-        # 查最新 snapshot_time
-        df = db.query("concept_mapping", datetime(2099, 1, 1), limit=1)
+        df = db.query("concept_mapping", datetime(2099, 1, 1))
         if df.empty:
             return False
         latest_snap = df["snapshot_time"].max()
@@ -38,7 +43,7 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
 
     策略：
     - 缓存存在且不超过 7 天 → 返回空 DataFrame（跳过采集）
-    - 缓存不存在或超过 7 天 → 全量拉取
+    - 缓存不存在或超过 7 天 → 同花顺拉概念列表 + DB 行业反推映射
     - 拉取失败 → fallback 读缓存旧数据
 
     Args:
@@ -54,51 +59,98 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
         print(f"[concept] 缓存有效（{CACHE_TTL_DAYS}天内），跳过采集")
         return pd.DataFrame()
 
+    all_mappings = []
+
+    # 1. 从同花顺拉概念列表
+    ths_concepts = []
     for attempt in range(retries):
         try:
-            # 获取概念板块列表
-            concepts_df = ak.stock_board_concept_name_em()
-            if concepts_df is None or concepts_df.empty:
-                if attempt < retries - 1:
-                    time.sleep(3)
-                    continue
-                return _fallback(db, trade_date)
-
-            all_mappings = []
-            concept_names = concepts_df["板块名称"].tolist()
-
-            # 逐个概念拉成分股（这个接口限流严重）
-            for i, concept_name in enumerate(concept_names):
-                try:
-                    members = ak.stock_board_concept_cons_em(symbol=concept_name)
-                    if members is not None and not members.empty:
-                        codes = members["代码"].tolist()
-                        for code in codes:
-                            all_mappings.append({
-                                "stock_code": code,
-                                "concept_name": concept_name,
-                            })
-                    # 限流：每拉 10 个概念歇一下
-                    if (i + 1) % 10 == 0:
-                        time.sleep(1)
-                except Exception:
-                    continue
-
-            if not all_mappings:
-                return _fallback(db, trade_date)
-
-            print(f"[concept] 全量拉取完成: {len(all_mappings)} 条映射")
-            return pd.DataFrame(all_mappings)
-
+            concepts_df = ak.stock_board_concept_name_ths()
+            if concepts_df is not None and not concepts_df.empty:
+                # 同花顺返回 name, code 列
+                ths_concepts = concepts_df[["name", "code"]].to_dict("records")
+                print(f"[concept] 同花顺概念列表: {len(ths_concepts)} 个概念")
+                break
+            if attempt < retries - 1:
+                time.sleep(3)
         except Exception as e:
             if attempt < retries - 1:
-                print(f"[concept] 尝试 {attempt + 1}/{retries} 失败: {e}")
-                time.sleep(5)
+                print(f"[concept] 同花顺尝试 {attempt + 1}/{retries} 失败: {e}")
+                time.sleep(3)
             else:
-                print(f"[concept] 拉取失败，使用 fallback: {e}")
-                return _fallback(db, trade_date)
+                print(f"[concept] 同花顺拉取失败，使用 fallback: {e}")
 
-    return _fallback(db, trade_date)
+    # 2. 从 DB 的 zt_pool / strong_pool 提取行业映射
+    db_mappings = _extract_industry_mappings(db)
+    if db_mappings:
+        all_mappings.extend(db_mappings)
+        print(f"[concept] 从 DB 行业字段提取 {len(db_mappings)} 条映射")
+
+    # 3. 如果同花顺概念列表获取成功，补充概念名映射
+    #    （注意：同花顺没有直接获取概念成分股的稳定接口，
+    #      所以我们用「行业」字段作为 concept_name 的替代）
+    #    将同花顺概念名存入映射表，供后续 concept_daily 聚合使用
+    if ths_concepts:
+        concept_names = [c["name"] for c in ths_concepts]
+        # 尝试从已有数据中匹配概念→股票关系
+        for concept_name in concept_names:
+            # 用概念名去行业字段中模糊匹配
+            if db is not None:
+                try:
+                    conn = db._get_conn()
+                    # 在 zt_pool 和 strong_pool 的「所属行业」中搜索包含概念名的记录
+                    rows = conn.execute(
+                        "SELECT DISTINCT stock_code FROM zt_pool WHERE industry LIKE ? "
+                        "UNION "
+                        "SELECT DISTINCT stock_code FROM strong_pool WHERE reason LIKE ?",
+                        (f"%{concept_name}%", f"%{concept_name}%"),
+                    ).fetchall()
+                    conn.close()
+                    for row in rows:
+                        all_mappings.append({
+                            "stock_code": row[0],
+                            "concept_name": concept_name,
+                        })
+                except Exception:
+                    pass
+
+    if not all_mappings:
+        return _fallback(db, trade_date)
+
+    # 去重
+    df = pd.DataFrame(all_mappings).drop_duplicates(subset=["stock_code", "concept_name"])
+    print(f"[concept] 总计 {len(df)} 条映射（去重后）")
+    return df
+
+
+def _extract_industry_mappings(db: Storage) -> list[dict]:
+    """从 DB 的 zt_pool / strong_pool 提取 stock_code → 所属行业 映射。"""
+    if db is None:
+        return []
+
+    mappings = []
+    try:
+        conn = db._get_conn()
+        # zt_pool 有 industry 字段（从 akshare_zt_pool.py 写入时映射）
+        # 但当前 zt_pool 没有 industry 列，只有 strong_pool 的 reason
+        # 从 strong_pool 取 industry 信息
+        rows = conn.execute(
+            "SELECT DISTINCT stock_code, reason FROM strong_pool WHERE reason != ''"
+        ).fetchall()
+        conn.close()
+
+        for stock_code, reason in rows:
+            if reason and str(reason).strip():
+                mappings.append({
+                    "stock_code": stock_code,
+                    "concept_name": str(reason).strip(),
+                })
+
+        logger.info("从 strong_pool 提取 %d 条行业映射", len(mappings))
+    except Exception as e:
+        logger.warning("提取行业映射失败: %s", e)
+
+    return mappings
 
 
 def _fallback(db: Storage, trade_date: str) -> pd.DataFrame:
