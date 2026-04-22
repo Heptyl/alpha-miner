@@ -459,11 +459,8 @@ def _fetch_daily_ak(trade_date: str, max_retries: int = 3, multi_thread: bool = 
     return pd.DataFrame()
 
 
-def save(df: pd.DataFrame, db: Storage) -> int:
-    """将日K线数据写入数据库。"""
+def save(df: pd.DataFrame, db: Storage, dedup: bool = False) -> int:
+    """将行情数据写入数据库。"""
     if df.empty:
         return 0
-    keep_cols = ["stock_code", "trade_date", "open", "high", "low", "close",
-                 "volume", "amount", "turnover_rate"]
-    df = df[[c for c in keep_cols if c in df.columns]].copy()
-    return db.insert("daily_price", df)
+    return db.insert("daily_price", df, dedup=dedup)

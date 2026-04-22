@@ -102,7 +102,7 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
                     rows = conn.execute(
                         "SELECT DISTINCT stock_code FROM zt_pool WHERE industry LIKE ? "
                         "UNION "
-                        "SELECT DISTINCT stock_code FROM strong_pool WHERE reason LIKE ?",
+                        "SELECT DISTINCT stock_code FROM strong_pool WHERE industry LIKE ?",
                         (f"%{concept_name}%", f"%{concept_name}%"),
                     ).fetchall()
                     conn.close()
@@ -131,22 +131,22 @@ def _extract_industry_mappings(db: Storage) -> list[dict]:
     mappings = []
     try:
         conn = db._get_conn()
-        # zt_pool 有 industry 字段（从 akshare_zt_pool.py 写入时映射）
-        # 但当前 zt_pool 没有 industry 列，只有 strong_pool 的 reason
-        # 从 strong_pool 取 industry 信息
+        # 从 zt_pool 和 strong_pool 的 industry 列提取
         rows = conn.execute(
-            "SELECT DISTINCT stock_code, reason FROM strong_pool WHERE reason != ''"
+            "SELECT DISTINCT stock_code, industry FROM zt_pool WHERE industry != '' "
+            "UNION "
+            "SELECT DISTINCT stock_code, industry FROM strong_pool WHERE industry != ''"
         ).fetchall()
         conn.close()
 
-        for stock_code, reason in rows:
-            if reason and str(reason).strip():
+        for stock_code, industry in rows:
+            if industry and str(industry).strip():
                 mappings.append({
                     "stock_code": stock_code,
-                    "concept_name": str(reason).strip(),
+                    "concept_name": str(industry).strip(),
                 })
 
-        logger.info("从 strong_pool 提取 %d 条行业映射", len(mappings))
+        logger.info("从 zt_pool/strong_pool 提取 %d 条行业映射", len(mappings))
     except Exception as e:
         logger.warning("提取行业映射失败: %s", e)
 
@@ -167,7 +167,13 @@ def _fallback(db: Storage, trade_date: str) -> pd.DataFrame:
 
 
 def save(df: pd.DataFrame, db: Storage) -> int:
-    """将概念映射写入数据库。"""
+    """将概念映射写入数据库（全量替换）。"""
     if df.empty:
         return 0
+    conn = db._get_conn()
+    try:
+        conn.execute("DELETE FROM concept_mapping")
+        conn.commit()
+    finally:
+        conn.close()
     return db.insert("concept_mapping", df)

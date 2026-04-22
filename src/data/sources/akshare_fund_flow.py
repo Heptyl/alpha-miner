@@ -24,21 +24,27 @@ _BATCH_FAILURE_THRESHOLD = 15  # 连续失败多少只后终止
 
 
 def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
-    """拉取全市场资金流向 — 逐只用 stock_individual_fund_flow.
+    """拉取资金流向 — 逐只用 stock_individual_fund_flow.
 
-    注意：此接口也走东方财富，可能被 WAF 拦截。
-    只在收盘后（15:10 之后）尝试采集，盘中跳过（返回空）。
+    盘中: 只拉涨停+龙虎榜重点股票（~50只，0.3s/只 ≈ 15s）
+    收盘后: 拉全量 DB 已有股票（限流+连续失败终止）
     """
     from datetime import datetime as _dt
 
     now = _dt.now()
-    # 只在收盘后尝试（资金流数据收盘后才完整）
     market_closed = now.hour > 15 or (now.hour == 15 and now.minute >= 10)
-    if not market_closed:
-        print("  [SKIP] fund_flow: 盘中跳过，收盘后采集")
-        return pd.DataFrame()
 
-    result = _fetch_fund_flow_batch(trade_date)
+    if market_closed:
+        # 收盘后：全量
+        result = _fetch_fund_flow_batch(trade_date, codes=_get_codes_from_db())
+    else:
+        # 盘中：只拉重点股票
+        codes = _get_priority_codes(trade_date)
+        if not codes:
+            print("  [SKIP] fund_flow: 盘中无重点股票")
+            return pd.DataFrame()
+        result = _fetch_fund_flow_batch(trade_date, codes=codes)
+
     if not result.empty:
         return result
 
@@ -46,9 +52,36 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def _fetch_fund_flow_batch(trade_date: str) -> pd.DataFrame:
-    """从 DB 拿代码列表，逐只用 stock_individual_fund_flow 查询."""
-    codes = _get_codes_from_db()
+def _get_priority_codes(trade_date: str) -> list[str]:
+    """从 DB 获取当日涨停+龙虎榜的股票代码。"""
+    try:
+        db = Storage()
+        conn = db._get_conn()
+        codes = []
+        for table in ["zt_pool", "lhb_detail"]:
+            try:
+                rows = conn.execute(
+                    f"SELECT DISTINCT stock_code FROM {table} WHERE trade_date = ?",
+                    (trade_date,),
+                ).fetchall()
+                codes.extend([r[0] for r in rows])
+            except Exception:
+                pass
+        conn.close()
+        return list(dict.fromkeys(codes))
+    except Exception:
+        return []
+
+
+def _fetch_fund_flow_batch(trade_date: str, codes: list[str] | None = None) -> pd.DataFrame:
+    """逐只用 stock_individual_fund_flow 查询资金流.
+
+    Args:
+        trade_date: 交易日期
+        codes: 股票代码列表。None 则从 DB 获取全量。
+    """
+    if codes is None:
+        codes = _get_codes_from_db()
     if not codes:
         return pd.DataFrame()
 
@@ -140,8 +173,8 @@ def _get_codes_from_db() -> list[str]:
         return []
 
 
-def save(df: pd.DataFrame, db: Storage) -> int:
+def save(df: pd.DataFrame, db: Storage, dedup: bool = False) -> int:
     """将资金流向数据写入数据库。"""
     if df.empty:
         return 0
-    return db.insert("fund_flow", df)
+    return db.insert("fund_flow", df, dedup=dedup)

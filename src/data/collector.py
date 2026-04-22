@@ -6,6 +6,7 @@
 """
 
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -89,7 +90,7 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
             df = akshare_price.fetch_history(trade_date)
         else:
             df = akshare_price.fetch_today(trade_date)
-        count = akshare_price.save(df, db)
+        count = akshare_price.save(df, db, dedup=True)
         results["daily_price"] = count
         print(f"  [OK] daily_price: {count} rows")
     except Exception as e:
@@ -99,12 +100,42 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
     # 6. 资金流向
     try:
         df = akshare_fund_flow.fetch(trade_date)
-        count = akshare_fund_flow.save(df, db)
+        count = akshare_fund_flow.save(df, db, dedup=True)
         results["fund_flow"] = count
         print(f"  [OK] fund_flow: {count} rows")
     except Exception as e:
         results["fund_flow"] = 0
         print(f"  [FAIL] fund_flow: {e}")
+
+    # 6b. 个股新闻 — 拉涨停+强势股的新闻（限流 0.5s/只）
+    try:
+        news_codes = _get_news_codes(trade_date, db)
+        if news_codes:
+            all_news = []
+            for code in news_codes:
+                try:
+                    df = akshare_news.fetch(stock_code=code, trade_date=trade_date)
+                    if not df.empty:
+                        all_news.append(df)
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            if all_news:
+                combined = pd.concat(all_news, ignore_index=True)
+                # 去重：同 title+publish_time 只保留一条
+                combined = combined.drop_duplicates(subset=["news_id"], keep="first")
+                count = akshare_news.save(combined, db)
+                results["news"] = count
+                print(f"  [OK] news: {count} rows ({len(news_codes)} stocks)")
+            else:
+                results["news"] = 0
+                print(f"  [SKIP] news: 无当日新闻")
+        else:
+            results["news"] = 0
+            print(f"  [SKIP] news: 无重点股票代码")
+    except Exception as e:
+        results["news"] = 0
+        print(f"  [FAIL] news: {e}")
 
     # 7. 概念映射（不稳定，频率低，可以不是每天都更新）
     try:
@@ -198,6 +229,29 @@ def _aggregate_market_emotion(trade_date: str, db: Storage) -> None:
         "sentiment_level": sentiment_level,
     }])
     db.insert("market_emotion", emotion_df)
+
+
+def _get_news_codes(trade_date: str, db: Storage) -> list[str]:
+    """获取当日需要拉新闻的股票代码（涨停+龙虎榜）。
+
+    不含 strong_pool（300+只太多，新闻接口限流）。
+    """
+    try:
+        conn = db._get_conn()
+        codes = []
+        for table in ["zt_pool", "lhb_detail"]:
+            try:
+                rows = conn.execute(
+                    f"SELECT DISTINCT stock_code FROM {table} WHERE trade_date = ?",
+                    (trade_date,),
+                ).fetchall()
+                codes.extend([r[0] for r in rows])
+            except Exception:
+                pass
+        conn.close()
+        return list(dict.fromkeys(codes))  # 去重保序
+    except Exception:
+        return []
 
 
 def _classify_sentiment(zt_count: int, dt_count: int, highest_board: int) -> str:

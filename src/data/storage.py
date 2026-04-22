@@ -34,6 +34,18 @@ class Storage:
         conn = self._get_conn()
         try:
             conn.executescript(schema_sql)
+            # 为 zt_pool 新增 name / industry 列（幂等）
+            for stmt in [
+                "ALTER TABLE daily_price ADD COLUMN pre_close REAL",
+                "ALTER TABLE zt_pool ADD COLUMN name TEXT DEFAULT ''",
+                "ALTER TABLE zt_pool ADD COLUMN industry TEXT DEFAULT ''",
+                "ALTER TABLE strong_pool ADD COLUMN name TEXT DEFAULT ''",
+                "ALTER TABLE strong_pool ADD COLUMN industry TEXT DEFAULT ''",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             # 为 market_emotion 新增活跃度/涨跌家数列（幂等）
             for stmt in [
                 "ALTER TABLE market_emotion ADD COLUMN up_count INTEGER DEFAULT 0",
@@ -121,6 +133,7 @@ class Storage:
         table: str,
         df: pd.DataFrame,
         snapshot_time: Optional[datetime] = None,
+        dedup: bool = False,
     ) -> int:
         """将 DataFrame 写入数据库，自动添加 snapshot_time 列。
 
@@ -128,19 +141,33 @@ class Storage:
             table: 目标表名
             df: 要写入的数据
             snapshot_time: 可选，手动指定 snapshot_time（主要用于测试）
+            dedup: True 时，写入前先删除同日旧数据（只保留最新快照）。
+                   适用于 daily_price 等不需要保留盘中多快照的表。
         """
         if df.empty:
             return 0
 
         df = df.copy()
         if snapshot_time is not None:
-            now_str = snapshot_time.strftime("%Y-%m-%d %H:%M:%S")
+            now_str = snapshot_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         else:
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         df["snapshot_time"] = now_str
 
         conn = self._get_conn()
         try:
+            if dedup and "trade_date" in df.columns:
+                # 先确认表中有 trade_date 列
+                table_cols = {r[1] for r in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
+                if "trade_date" in table_cols:
+                    dates = df["trade_date"].unique()
+                    placeholders = ",".join(["?"] * len(dates))
+                    conn.execute(
+                        f"DELETE FROM [{table}] WHERE trade_date IN ({placeholders})",
+                        tuple(dates),
+                    )
+                    conn.commit()
+
             df.to_sql(table, conn, if_exists="append", index=False)
             conn.commit()
             return len(df)

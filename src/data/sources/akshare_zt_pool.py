@@ -47,9 +47,11 @@ def fetch_zt_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
 
             result = pd.DataFrame({
                 "stock_code": df["代码"].values,
+                "name": _safe_str(df, "名称", "").values,
                 "trade_date": trade_date,
                 "consecutive_zt": _safe_numeric(df, "连板数", 1).astype(int).values,
                 "amount": _safe_numeric(df, "成交额", 0).values,
+                "industry": _safe_str(df, "所属行业", "").values,
                 "circulation_mv": _safe_numeric(df, "流通市值", 0).values,
                 "open_count": _safe_numeric(df, "炸板次数", 0).astype(int).values,
                 "zt_stats": _safe_str(df, "涨停统计", "").values,
@@ -112,9 +114,11 @@ def fetch_strong_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
 
             result = pd.DataFrame({
                 "stock_code": df["代码"].values,
+                "name": _safe_str(df, "名称", "").values,
                 "trade_date": trade_date,
                 "amount": _safe_numeric(df, "成交额", 0).values,
-                "reason": _safe_str(df, "涨停原因", "").values,
+                "reason": _safe_str(df, "入选理由", "").values,
+                "industry": _safe_str(df, "所属行业", "").values,
             })
             return result
         except Exception as e:

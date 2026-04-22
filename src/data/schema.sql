@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS daily_price (
     high         REAL,
     low          REAL,
     close        REAL,
+    pre_close    REAL,
     volume       REAL,
     amount       REAL,
     turnover_rate REAL,
@@ -21,8 +22,10 @@ CREATE INDEX IF NOT EXISTS idx_daily_price_code ON daily_price(stock_code);
 CREATE TABLE IF NOT EXISTS zt_pool (
     stock_code      TEXT NOT NULL,
     trade_date      TEXT NOT NULL,
+    name            TEXT DEFAULT '',
     consecutive_zt  INTEGER DEFAULT 1,
     amount          REAL,
+    industry        TEXT DEFAULT '',
     circulation_mv  REAL,
     open_count      INTEGER DEFAULT 0,
     zt_stats        TEXT,
@@ -46,8 +49,10 @@ CREATE INDEX IF NOT EXISTS idx_zb_pool_date ON zb_pool(trade_date);
 CREATE TABLE IF NOT EXISTS strong_pool (
     stock_code    TEXT NOT NULL,
     trade_date    TEXT NOT NULL,
+    name          TEXT DEFAULT '',
     amount        REAL,
     reason        TEXT,
+    industry      TEXT DEFAULT '',
     snapshot_time TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (stock_code, trade_date, snapshot_time)
 );
