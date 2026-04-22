@@ -691,6 +691,7 @@ class DailyBrief:
         holdings: Optional[list[str]] = None,
         top_n: int = 10,
         report_date: str = "",
+        enable_strategy_scan: bool = False,
     ) -> str:
         """生成完整盘后简报。"""
         parts = []
@@ -728,4 +729,45 @@ class DailyBrief:
             else:
                 parts.append("\n持仓无风险预警。")
 
+        # 交付物四：策略扫描信号
+        if enable_strategy_scan:
+            scan_text = self._strategy_scan(as_of, report_date)
+            if scan_text:
+                parts.append(scan_text)
+
         return "\n".join(parts)
+
+    def _strategy_scan(self, as_of: datetime, report_date: str) -> str:
+        """用预置策略扫描当日信号。"""
+        try:
+            from src.strategy.loader import load_strategies
+            from src.strategy.backtest_engine import BacktestEngine
+        except ImportError:
+            return ""
+
+        strategies = load_strategies()
+        if not strategies:
+            return ""
+
+        engine = BacktestEngine(self.db)
+        lines = ["\n策略扫描信号："]
+
+        any_signal = False
+        for s in strategies:
+            universe = engine._get_universe(report_date, "zt_pool", as_of)
+            signals = []
+            for code in universe:
+                if engine._check_entry(s.entry, code, report_date, as_of):
+                    signals.append(code)
+
+            if signals:
+                any_signal = True
+                sig_str = ", ".join(signals[:5])
+                if len(signals) > 5:
+                    sig_str += f" ...+{len(signals)-5}"
+                lines.append(f"  ▸ {s.name}: {sig_str}")
+
+        if not any_signal:
+            lines.append("  （无策略信号）")
+
+        return "\n".join(lines)

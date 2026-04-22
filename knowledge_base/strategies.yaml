@@ -1,0 +1,97 @@
+# 预置策略库 — 从 theories.yaml 的 12 个假说转化为可回测的策略
+# 每个策略包含完整的入场/出场/仓位规则
+
+strategies:
+  - name: "首板打板_龙头确认"
+    description: "题材启动期，龙头首板次日低开介入"
+    tags: ["打板", "龙头", "首板"]
+    source: "info_cascade + theme_lifecycle"
+    entry:
+      regime_filter: ["board_rally", "theme_rotation", "normal"]
+      conditions:
+        - {factor: "consecutive_board", op: ">=", value: 1}
+        - {factor: "turnover_rank", op: ">=", value: 0.3}
+      timing: "next_open"
+    exit:
+      take_profit_pct: 7.0
+      stop_loss_pct: -3.0
+      max_hold_days: 3
+      exit_conditions:
+        - {factor: "consecutive_board", op: "<", value: 1,
+           reason: "连板中断"}
+    position:
+      single_position_pct: 25.0
+      max_holdings: 3
+
+  - name: "题材发酵_跟风低吸"
+    description: "题材爆发期，非龙头低吸抢反包"
+    tags: ["低吸", "跟风", "反包"]
+    source: "theme_lifecycle"
+    entry:
+      regime_filter: ["theme_rotation", "normal"]
+      conditions:
+        - {factor: "turnover_rank", op: ">=", value: 0.3}
+        - {factor: "consecutive_board", op: "==", value: 0}
+      timing: "next_open"
+    exit:
+      take_profit_pct: 5.0
+      stop_loss_pct: -4.0
+      max_hold_days: 2
+    position:
+      single_position_pct: 15.0
+      max_holdings: 4
+
+  - name: "情绪冰点_反弹首板"
+    description: "极弱情绪持续后首个涨停股"
+    tags: ["反转", "冰点", "首板"]
+    source: "emotion_regime"
+    entry:
+      regime_filter: []
+      conditions:
+        - {factor: "consecutive_board", op: "==", value: 1}
+        - {factor: "turnover_rank", op: ">=", value: 0.5}
+      timing: "next_open"
+    exit:
+      take_profit_pct: 10.0
+      stop_loss_pct: -5.0
+      max_hold_days: 5
+    position:
+      single_position_pct: 20.0
+      max_holdings: 2
+
+  - name: "三班组回避"
+    description: "识别游资对倒出货，生成卖出信号"
+    tags: ["风控", "出货", "回避"]
+    source: "three_shift"
+    entry:
+      regime_filter: []
+      conditions:
+        - {factor: "consecutive_board", op: ">=", value: 2}
+        - {factor: "turnover_rank", op: "<", value: 0.2}
+      timing: "next_open"
+    exit:
+      take_profit_pct: 3.0
+      stop_loss_pct: -2.0
+      max_hold_days: 1
+    position:
+      single_position_pct: 10.0
+      max_holdings: 1
+
+  - name: "连板接力_情绪共振"
+    description: "市场情绪高潮期，连板股接力"
+    tags: ["打板", "连板", "情绪"]
+    source: "herd_effect"
+    entry:
+      regime_filter: ["board_rally"]
+      conditions:
+        - {factor: "consecutive_board", op: ">=", value: 2}
+        - {factor: "turnover_rank", op: ">=", value: 0.5}
+      timing: "next_open"
+    exit:
+      take_profit_pct: 8.0
+      stop_loss_pct: -4.0
+      max_hold_days: 2
+      trailing_stop_pct: 3.0
+    position:
+      single_position_pct: 20.0
+      max_holdings: 2

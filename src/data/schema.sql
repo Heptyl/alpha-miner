@@ -228,3 +228,62 @@ CREATE TABLE IF NOT EXISTS replay_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_replay_log_date ON replay_log(trade_date);
+
+-- ═══════════════════════════════════════════════════════════
+-- 策略系统表
+-- ═══════════════════════════════════════════════════════════
+
+-- 策略定义（持久化 Strategy 对象）
+CREATE TABLE IF NOT EXISTS strategy_defs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT UNIQUE NOT NULL,
+    description    TEXT DEFAULT '',
+    yaml_body      TEXT NOT NULL,          -- 完整 YAML 序列化
+    parent         TEXT,                   -- 进化来源
+    version        INTEGER DEFAULT 1,
+    source         TEXT DEFAULT 'manual',  -- manual / evolver / knowledge_base
+    tags           TEXT DEFAULT '[]',      -- JSON array
+    created_at     TEXT DEFAULT (datetime('now')),
+    snapshot_time  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_defs_name ON strategy_defs(name);
+
+-- 回测报告
+CREATE TABLE IF NOT EXISTS strategy_reports (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name    TEXT NOT NULL,
+    backtest_start   TEXT NOT NULL,
+    backtest_end     TEXT NOT NULL,
+    total_trades     INTEGER DEFAULT 0,
+    win_rate         REAL DEFAULT 0,
+    total_return_pct REAL DEFAULT 0,
+    sharpe_ratio     REAL DEFAULT 0,
+    max_drawdown_pct REAL DEFAULT 0,
+    profit_loss_ratio REAL DEFAULT 0,
+    report_yaml      TEXT,                 -- 完整报告 YAML
+    snapshot_time    TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (strategy_name) REFERENCES strategy_defs(name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_reports_name ON strategy_reports(strategy_name);
+
+-- 交易记录
+CREATE TABLE IF NOT EXISTS strategy_trades (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name  TEXT NOT NULL,
+    stock_code     TEXT NOT NULL,
+    entry_date     TEXT NOT NULL,
+    entry_price    REAL,
+    exit_date      TEXT,
+    exit_price     REAL,
+    return_pct     REAL,
+    hold_days      INTEGER DEFAULT 0,
+    exit_reason    TEXT,
+    regime_at_entry TEXT DEFAULT '',
+    snapshot_time  TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (strategy_name) REFERENCES strategy_defs(name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_trades_name ON strategy_trades(strategy_name);
+CREATE INDEX IF NOT EXISTS idx_strategy_trades_date ON strategy_trades(entry_date);

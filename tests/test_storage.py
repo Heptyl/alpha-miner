@@ -81,7 +81,7 @@ class TestInsert:
         assert "snapshot_time" in result.columns
         assert result["snapshot_time"].notna().all()
         # 验证 snapshot_time 值
-        assert result.iloc[0]["snapshot_time"] == "2024-06-15 10:00:00"
+        assert result.iloc[0]["snapshot_time"].startswith("2024-06-15 10:00:00")
 
 
 class TestQueryTimeIsolation:

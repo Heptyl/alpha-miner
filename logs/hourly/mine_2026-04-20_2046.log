@@ -1,0 +1,14 @@
+[20:46:50] ===== Alpha Miner Hourly: 2026-04-20 20:46:50 =====
+[20:46:50] [1/4] 采集数据...
+scripts/hourly_mine.sh: line 20: python: command not found
+[20:46:50] [WARN] 采集部分失败（可能非交易日）
+[20:46:50] [2/4] 计算因子...
+scripts/hourly_mine.sh: line 24: python: command not found
+[20:46:50] [WARN] 因子计算异常
+[20:46:50] [3/4] 漂移检测...
+scripts/hourly_mine.sh: line 28: python: command not found
+[20:46:50] [WARN] 漂移检测异常
+[20:46:50] [4/4] 因子进化...
+scripts/hourly_mine.sh: line 32: python: command not found
+[20:46:50] [WARN] 进化异常
+[20:46:50] ===== Done =====

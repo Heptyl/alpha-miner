@@ -220,9 +220,72 @@ def backtest_factor(
     print(f"{'='*60}")
 
 
+def compute_all(db_path: str = "data/alpha_miner.db"):
+    """计算所有交易日的因子值并写入 factor_values 表。"""
+    db = Storage(db_path)
+    registry = FactorRegistry()
+
+    # 从 zt_pool + daily_price 获取所有交易日
+    price_df = db.query("daily_price", datetime.now())
+    if price_df.empty:
+        print("[ERROR] daily_price 无数据")
+        return
+
+    trade_dates = sorted(price_df["trade_date"].unique())
+    print(f"[INFO] 共 {len(trade_dates)} 个交易日")
+
+    total_rows = 0
+    for idx, date_str in enumerate(trade_dates):
+        as_of = datetime.strptime(date_str, "%Y-%m-%d")
+        # 用当天 23:59:59 确保覆盖当天采集的 snapshot_time
+        query_as_of = as_of.replace(hour=23, minute=59, second=59)
+
+        universe = get_universe(db, query_as_of)
+        if not universe:
+            print(f"  [{idx+1}/{len(trade_dates)}] {date_str}: 无行情数据，跳过")
+            continue
+
+        print(f"  [{idx+1}/{len(trade_dates)}] {date_str}: universe={len(universe)} 只")
+
+        snap_time = datetime.now()
+        day_rows = 0
+
+        for name in registry.list_factors():
+            factor = registry.get_factor(name)
+            try:
+                values = factor.compute(universe, query_as_of, db)
+            except Exception as e:
+                print(f"    {name}: ERROR - {e}")
+                continue
+
+            if values.empty:
+                continue
+
+            rows = []
+            for code, val in values.items():
+                if pd.notna(val):
+                    rows.append({
+                        "factor_name": name,
+                        "stock_code": code,
+                        "trade_date": date_str,
+                        "factor_value": float(val),
+                    })
+
+            if rows:
+                df = pd.DataFrame(rows)
+                db.insert("factor_values", df, snapshot_time=snap_time)
+                day_rows += len(rows)
+
+        total_rows += day_rows
+        print(f"    写入 {day_rows} 条")
+
+    print(f"\n[DONE] 共 {len(trade_dates)} 天，写入 {total_rows} 条因子值")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alpha Miner 回测")
     parser.add_argument("--compute-today", action="store_true", help="计算今日所有因子值")
+    parser.add_argument("--compute-all", action="store_true", help="计算所有交易日因子值")
     parser.add_argument("--factor", type=str, help="单因子回测的因子名")
     parser.add_argument("--start", type=str, help="回测开始日期")
     parser.add_argument("--end", type=str, help="回测结束日期")
@@ -233,6 +296,8 @@ def main():
 
     if args.compute_today:
         compute_today(args.db)
+    elif args.compute_all:
+        compute_all(args.db)
     elif args.factor:
         if not args.start or not args.end:
             print("[ERROR] 单因子回测需要 --start 和 --end")

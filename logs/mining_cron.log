@@ -1,0 +1,26 @@
+
+========== [2026-04-21 08:57:53] hourly_mining START ==========
+[info] Weekday=2, time=08:57, skipping collect (before 15:40)
+[backtest] exit=0 (no data - skipped collect)
+[drift] exit=0 (no data)
+[evolve] exit=0 (0 factors passed)
+[report] exit=0 (saved to reports/2026-04-21.txt)
+[script] exit=0 (saved to db)
+[replay] exit=1 (module cli.replay not found)
+========== [2026-04-21 09:03:53] hourly_mining END ==========
+
+========== [2026-04-21 14:46:20] hourly_mining START ==========
+Day of week: Tuesday, Weekend: False, After 15:40: False
+[collect] SKIPPED (before 15:40)
+[backtest] exit=1
+[drift] exit=1
+[evolve] exit=1
+[backtest] exit=0
+[drift] exit=0
+[backtest] exit=0
+[drift] exit=0
+[evolve] exit=1
+[report] exit=0
+[script] exit=0
+[replay] exit=0
+========== [2026-04-21 15:04:20] hourly_mining END ==========

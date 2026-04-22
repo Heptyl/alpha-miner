@@ -1,0 +1,80 @@
+[20:47:47] ===== Alpha Miner Hourly: 2026-04-20 20:47:47 =====
+[20:47:47] [1/4] 采集数据...
+
+采集数据: 2026-04-20
+[akshare_price] 尝试 1/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[akshare_price] 尝试 2/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[akshare_price] 拉取失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+  [OK] daily_price: 0 rows
+  [OK] zt_pool: 75 rows
+  [OK] zb_pool: 15 rows
+  [OK] strong_pool: 287 rows
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  5.32it/s]                                               [OK] lhb_detail: 73 rows
+[fund_flow] 尝试 1/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[fund_flow] 尝试 2/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[fund_flow] 拉取失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+  [OK] fund_flow: 0 rows
+[concept] 尝试 1/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[concept] 尝试 2/3 失败: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+[concept] 拉取失败，使用 fallback: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+  [SKIP] concept_mapping: empty
+  [OK] market_emotion: aggregated
+  [OK] concept_daily: aggregated
+  Total: 452 from 9 sources
+       采集结果: 2026-04-20       
+┏━━━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━┓
+┃ 数据源          ┃ 行数 ┃ 状态  ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━┩
+│ daily_price     │    0 │ EMPTY │
+│ zt_pool         │   75 │  OK   │
+│ zb_pool         │   15 │  OK   │
+│ strong_pool     │  287 │  OK   │
+│ lhb_detail      │   73 │  OK   │
+│ fund_flow       │    0 │ EMPTY │
+│ concept_mapping │    0 │ EMPTY │
+│ market_emotion  │    1 │  OK   │
+│ concept_daily   │    1 │  OK   │
+│ Total           │  452 │       │
+└─────────────────┴──────┴───────┘
+[20:48:45] [2/4] 计算因子...
+[WARN] 2026-04-20 无行情数据，尝试最近一个交易日
+[ERROR] 找不到可用交易日数据
+[20:48:46] [3/4] 漂移检测...
+============================================================
+  Alpha Miner 漂移报告 — 2026-04-20
+============================================================
+
+[市场状态] normal (置信度: 1.00)
+  zt_count: 0
+  highest_board: 0
+
+[因子状态]
+  因子                        状态             最新IC     IC均值     ICIR       胜率 趋势        
+  -------------------------------------------------------------------------------------
+  zt_dt_ratio               no_data         N/A      N/A      N/A      N/A unknown   
+  consecutive_board         no_data         N/A      N/A      N/A      N/A unknown   
+  main_flow_intensity       no_data         N/A      N/A      N/A      N/A unknown   
+  turnover_rank             no_data         N/A      N/A      N/A      N/A unknown   
+  lhb_institution           no_data         N/A      N/A      N/A      N/A unknown   
+  theme_lifecycle           no_data         N/A      N/A      N/A      N/A unknown   
+  narrative_velocity        no_data         N/A      N/A      N/A      N/A unknown   
+  theme_crowding            no_data         N/A      N/A      N/A      N/A unknown   
+  leader_clarity            no_data         N/A      N/A      N/A      N/A unknown   
+
+[告警] 无
+
+============================================================
+[20:48:47] [4/4] 因子进化...
+[INFO] LLM 已连接: Z.AI (openclaw.json)
+
+============================================================
+  Alpha Miner 进化引擎
+  generations=1, population=3
+============================================================
+
+
+============================================================
+  进化完成
+  总验收因子: 0
+============================================================
+[20:51:21] ===== Done =====

@@ -25,9 +25,10 @@ class DailyReport:
         self.registry = FactorRegistry()
         self.mining_log_path = Path(mining_log_path)
 
-    def generate(self, as_of: datetime) -> str:
+    def generate(self, as_of: datetime, report_date: str | None = None) -> str:
         """生成完整日报文本。"""
-        date_str = as_of.strftime("%Y-%m-%d")
+        # report_date 用于数据查询, as_of 用于 snapshot_time 过滤
+        date_str = report_date or as_of.strftime("%Y-%m-%d")
         lines = []
 
         # ── 标题 ──
@@ -305,12 +306,8 @@ class DailyReport:
                    "news", "concept_mapping", "concept_daily", "factor_values"]
         for table in tables:
             try:
-                df = self.db.query(table, as_of, limit=1)
-                if not df.empty:
-                    count_df = self.db.query(table, as_of)
-                    lines.append(f"  {table:<20} {len(count_df)} rows")
-                else:
-                    lines.append(f"  {table:<20} 0 rows")
+                df = self.db.query(table, as_of)
+                lines.append(f"  {table:<20} {len(df)} rows")
             except Exception:
                 lines.append(f"  {table:<20} (表不存在)")
 

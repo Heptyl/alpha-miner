@@ -35,8 +35,8 @@ if __name__ == "__main__":
         from cli.report import main_script
         main_script()
     elif sub == "replay":
-        from cli.report import main_replay
-        main_replay()
+        from cli.replay import main
+        main()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()

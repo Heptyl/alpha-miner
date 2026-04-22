@@ -28,10 +28,11 @@ def main():
 
     if args.date:
         report_date = args.date
-        # as_of 取远未来，确保 snapshot_time < as_of 能查到所有采集的数据
-        as_of = datetime.strptime(args.date, "%Y-%m-%d")
+        # as_of 用 report_date 当天 23:59:59，确保 snapshot_time < as_of 能查到当天数据
+        as_of = datetime.strptime(args.date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        # 但数据通常是次日采集的(snapshot_time > trade_date)，所以加1天
         from datetime import timedelta
-        as_of = as_of + timedelta(days=10)
+        as_of = as_of + timedelta(days=1)
     else:
         report_date = datetime.now().strftime("%Y-%m-%d")
         as_of = datetime.now()
@@ -63,7 +64,7 @@ def main():
 
         print(f"[INFO] 生成日报: {report_date}")
         report = DailyReport(db, mining_log_path=args.log)
-        text = report.generate(as_of)
+        text = report.generate(as_of, report_date=report_date)
 
         # 终端输出
         print(text)
@@ -90,9 +91,9 @@ def main_script():
 
     if args.date:
         report_date = args.date
-        as_of = datetime.strptime(args.date, "%Y-%m-%d")
+        as_of = datetime.strptime(args.date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         from datetime import timedelta
-        as_of = as_of + timedelta(days=10)
+        as_of = as_of + timedelta(days=1)
     else:
         report_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         as_of = datetime.now()
@@ -173,9 +174,9 @@ def main_replay():
 
     if args.date:
         target_date = args.date
-        as_of = datetime.strptime(args.date, "%Y-%m-%d")
+        as_of = datetime.strptime(args.date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         from datetime import timedelta
-        as_of = as_of + timedelta(days=10)
+        as_of = as_of + timedelta(days=1)
     else:
         from datetime import timedelta
         target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
