@@ -7,15 +7,17 @@
 ```
 alpha-miner/
 ├── cli/                    # CLI 命令入口 (python -m cli <command>)
-│   ├── __main__.py         #   子命令路由 (collect / report / mine / drift / backtest / script / replay)
+│   ├── __main__.py         #   子命令路由 (collect / report / mine / drift / backtest / script / replay / strategy)
 │   ├── collect.py          #   数据采集
 │   ├── report.py           #   日报 + 盘后决策简报 + 市场剧本 + 复盘
 │   ├── mine.py             #   因子进化挖掘 (LLM 驱动)
 │   ├── drift.py            #   漂移报告
-│   └── backtest.py         #   单因子回测
+│   ├── backtest.py         #   单因子回测
+│   ├── replay.py           #   复盘 CLI
+│   └── strategy.py         #   策略管理 CLI (list / backtest / evolve / scan)
 ├── src/
 │   ├── data/               # 数据层
-│   │   ├── schema.sql      #   SQLite 表结构 (17 张表)
+│   │   ├── schema.sql      #   SQLite 表结构 (20 张表)
 │   │   ├── storage.py      #   Storage: 时间隔离查询、快照管理
 │   │   ├── collector.py    #   CollectorManager 调度器
 │   │   └── sources/        #   采集器 (akshare)
@@ -163,6 +165,84 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 - 沙箱：子进程隔离执行，预注入 `pd/datetime/Storage`
 - Prompt 模板：`explore` → `construct` → `analyze` 三阶段
 
+## 策略子系统 (Phase 4)
+
+策略 = 入场条件 + 出场条件 + 仓位管理的完整交易规则。
+
+### 架构
+
+```
+src/strategy/
+├── schema.py           # Strategy / Trade / StrategyReport 数据结构 + YAML 序列化
+├── backtest_engine.py  # 回测引擎 (T+1 / 多仓位 / regime 分组统计)
+├── loader.py           # YAML 策略加载 + 预置策略库
+├── evolver.py          # 参数网格搜索进化器
+└── store.py            # SQLite 持久化 (3 张新表)
+strategies/             # 8 个预置策略 YAML
+    ├── 首板打板_龙头确认.yaml
+    ├── 连板接力_二板定龙头.yaml
+    ├── 题材轮动_新题材首板.yaml
+    └── ...
+```
+
+### 预置策略库 (8 个)
+
+| 策略 | 逻辑 | 标签 |
+|------|------|------|
+| 首板打板_龙头确认 | 题材首板 + 龙头清晰度 + 主力流入 | 首板, 打板 |
+| 连板接力_二板定龙头 | 二连板 + 题材热度 + 换手充分 | 连板, 接力 |
+| 龙头低吸_分歧转一致 | 龙头清晰度 > 2 + 换手排名前 30% | 低吸, 龙头 |
+| 题材轮动_新题材首板 | 叙事速度 > 0 + 题材生命周期 = 萌芽 | 题材轮动 |
+| 地量反弹_超跌首板 | 换手率极低 + 涨停/跌停比 > 5 | 地量反弹 |
+| 强势股回踩_二波 | 连板 > 3 + 回调不破关键位 | 二波 |
+| 早盘竞价_量比选股 | 开盘量比 + 主题热点 | 竞价 |
+| 打板防守_三班组避雷 | 三班组条件反向过滤 | 防守 |
+
+### 回测引擎
+
+- **T+1 约束**：当日买入次日才能卖出，符合 A 股规则
+- **多仓位管理**：最大持仓数限制，等权分配
+- **出场条件**：止盈 / 止损 / 最大持仓天数 / 条件出场（优先级递减）
+- **Regime 分组统计**：按市场状态分组统计胜率和收益
+
+### 策略进化器
+
+网格搜索参数空间，多目标优化：
+
+```bash
+python -m cli.strategy evolve \
+    --name "首板打板_龙头确认" \
+    --start 2026-01-01 --end 2026-03-31 \
+    --objective sharpe --top 5
+```
+
+优化目标：`sharpe` / `win_rate` / `profit_loss_ratio` / `composite`
+
+### 持久化 (3 张新表)
+
+| 表 | 用途 |
+|----|------|
+| strategy_defs | 策略定义（YAML 序列化 + 元数据） |
+| strategy_reports | 回测报告（胜率/夏普/回撤/盈亏比） |
+| strategy_trades | 交易记录（入场/出场/收益/regime） |
+
+### CLI
+
+```bash
+python -m cli.strategy list                                        # 列出预置策略
+python -m cli.strategy backtest --name "首板打板_龙头确认" --start 2026-01-01 --end 2026-03-31
+python -m cli.strategy evolve --name "首板打板_龙头确认" --start 2026-01-01 --end 2026-03-31
+python -m cli.strategy scan --date 2026-04-14                      # 当日信号扫描
+```
+
+### DailyBrief 整合
+
+盘后简报新增第四交付物 — 策略扫描信号：
+
+```bash
+python -m cli report --brief --strategy-scan
+```
+
 ## 盘后决策简报 (DailyBrief)
 
 `python -m cli report --brief` 生成三大交付物：
@@ -211,9 +291,9 @@ IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
 | CUSUM | 递归变点检测，识别因子 IC 结构性断裂 |
 | Regime | 市场状态分类 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 数据库 (17 张表)
+## 数据库 (20 张表)
 
-daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mapping, concept_daily, news, market_emotion, factor_values, ic_series, drift_events, regime_state, mining_log, market_scripts, replay_log
+daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mapping, concept_daily, news, market_emotion, factor_values, ic_series, drift_events, regime_state, mining_log, market_scripts, replay_log, strategy_defs, strategy_reports, strategy_trades
 
 ## 技术要点
 
@@ -232,8 +312,8 @@ daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mappi
 # 安装
 uv sync
 
-# 跑测试 (105 tests)
-uv run pytest tests/ -v -m "not live"
+# 跑测试 (171 tests)
+uv run pytest tests/ -v --ignore=tests/test_collect_live.py
 
 # 每日完整流程 (7 步)
 bash scripts/daily_run.sh
@@ -262,6 +342,7 @@ uv run python -m cli replay --stats
 | `alpha-miner-steps-wsl2.md` | 原始开发步骤记录 |
 | `factor-mining-v2.md` | 进化引擎设计文档 |
 | `narrative-strategy-upgrade.md` | 叙事引擎设计文档 (Phase 3) |
+| `strategy-backtest-upgrade.md` | 策略子系统设计文档 (Phase 4) |
 | `BUILD_LOG.md` | 构建日志 |
 | `CLAUDE.md` | Claude Code 协作指南 |
 
@@ -270,8 +351,9 @@ uv run python -m cli replay --stats
 - [ ] 数据自动填充（交易日 15:40 后 cron 采集）
 - [ ] 因子 IC 实盘验证（当前 DB 空，需数据积累）
 - [ ] 历史相似形态胜率（交付物二的补充）
+- [ ] 策略实盘信号推送（Telegram）
 - [ ] Web UI（当前 CLI 输出，后续 Excalidraw 可视化）
-- [ ] Telegram 推送集成
+- [ ] 贝叶斯参数优化（替代网格搜索）
 
 ## License
 
