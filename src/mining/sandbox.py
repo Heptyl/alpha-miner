@@ -76,3 +76,30 @@ class Sandbox:
             return {"error": str(e)}
         finally:
             Path(code_path).unlink(missing_ok=True)
+
+    def evaluate(self, code: str, lookback_days: int = 20, as_of=None) -> dict | None:
+        """执行因子代码并返回 IC 评估结果。
+
+        封装 execute()，提取 ic_result 字段返回。
+        """
+        import tempfile
+        from datetime import datetime
+
+        # 构建 wrapper code：在原始 code 外包裹 as_of 控制
+        if as_of is not None:
+            # 注入 as_of 截止日期控制到 _sandbox_runner 的 end_date
+            as_of_str = as_of.strftime("%Y-%m-%d") if isinstance(as_of, datetime) else str(as_of)
+            env_override = f"import os; os.environ['SANDBOX_AS_OF'] = '{as_of_str}'"
+            full_code = env_override + "\n" + code
+        else:
+            full_code = code
+
+        raw = self.execute(full_code)
+        if "error" in raw and "ic_result" not in raw:
+            return None
+
+        ic_result = raw.get("ic_result", {})
+        # 把顶层有用字段合并进来
+        ic_result.setdefault("sample_size", 0)
+        ic_result.setdefault("num_days", raw.get("num_valid_days", 0))
+        return ic_result

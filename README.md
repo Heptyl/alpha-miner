@@ -69,7 +69,7 @@ alpha-miner/
 ├── knowledge_base/         # 知识库
 │   └── theories.yaml       #   行为金融学理论库 (前景理论/信息瀑布/羊群效应等)
 ├── reports/                # 产出报告 [调试阶段，后续加入 .gitignore]
-├── tests/                  # 105 tests
+├── tests/                  # 261 tests (含 43 硬断言)
 └── pyproject.toml          # uv 项目配置
 ```
 
@@ -295,6 +295,24 @@ python -m cli report --brief --strategy-scan
 
 daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mapping, concept_daily, news, market_emotion, factor_values, ic_series, drift_events, regime_state, mining_log, market_scripts, replay_log, strategy_defs, strategy_reports, strategy_trades
 
+## 测试体系 (261 tests)
+
+### 硬断言测试 (43 个)
+
+三层端到端验证，手工构造数据集 + 精确期望值：
+
+| 测试文件 | 覆盖 | 数量 |
+|----------|------|------|
+| `test_hard_narrative_factors.py` | 16 个叙事因子的手工数值计算对比 | 16 |
+| `test_hard_ic.py` | IC 端到端（完美正/负相关、手工 Spearman、持久化、边界） | 7 |
+| `test_hard_evolution.py` | 进化引擎验收判定、阈值、序列化、变异/杂交 | 13 |
+| `test_template_factors.py` | 进化引擎 11 个种子模板因子可执行性 | 11 |
+
+### 已修复的生产 Bug
+
+- **`validate_no_future`**: `publish_time` 含时分秒与 `as_of` 日期字符串比较时误报未来数据 → 截取前10字符
+- **`_sandbox_runner ICIR`**: IC 标准差为0时（完美因子）ICIR 返回 0.0 导致验收失败 → 返回 999.0
+
 ## 技术要点
 
 - **时间隔离**: Storage 层严格按 snapshot_time 隔离，因子计算只看到 as_of 之前的数据，杜绝未来函数
@@ -312,7 +330,7 @@ daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mappi
 # 安装
 uv sync
 
-# 跑测试 (171 tests)
+# 跑测试 (261 tests)
 uv run pytest tests/ -v --ignore=tests/test_collect_live.py
 
 # 每日完整流程 (7 步)

@@ -67,6 +67,10 @@ class FactorMutator:
 
         new_conditions = []
         for cond in conditions:
+            # 容错：字符串条件跳过数值调整，保留原样
+            if isinstance(cond, str):
+                new_conditions.append(cond)
+                continue
             cond = dict(cond)
             if "value" in cond and isinstance(cond["value"], (int, float)):
                 op = cond.get("operator", ">")
@@ -86,6 +90,10 @@ class FactorMutator:
 
         new_conditions = []
         for cond in conditions:
+            # 容错：字符串条件跳过数值调整，保留原样
+            if isinstance(cond, str):
+                new_conditions.append(cond)
+                continue
             cond = dict(cond)
             if "value" in cond and isinstance(cond["value"], (int, float)):
                 op = cond.get("operator", ">")

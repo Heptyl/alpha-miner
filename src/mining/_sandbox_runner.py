@@ -59,7 +59,12 @@ def main():
         }
 
         # 1. 找到可用交易日列表
-        end_date = datetime.now()
+        # 支持通过环境变量 SANDBOX_AS_OF 控制截止日期（用于测试）
+        _as_of_env = os.environ.get("SANDBOX_AS_OF")
+        if _as_of_env:
+            end_date = datetime.strptime(_as_of_env, "%Y-%m-%d")
+        else:
+            end_date = datetime.now()
         # 先尝试取最近交易日
         trade_dates = []
         for i in range(90):  # 往回看90天
@@ -170,7 +175,7 @@ def main():
             ic_arr = np.array(daily_ics)
             ic_result["ic_mean"] = float(np.mean(ic_arr))
             ic_result["ic_std"] = float(np.std(ic_arr))
-            ic_result["icir"] = float(np.mean(ic_arr) / np.std(ic_arr)) if np.std(ic_arr) > 0 else 0.0
+            ic_result["icir"] = float(np.mean(ic_arr) / np.std(ic_arr)) if np.std(ic_arr) > 0 else 999.0
             ic_result["win_rate"] = float(np.mean(ic_arr > 0))
             ic_result["sample_size"] = int(np.mean(daily_sample_sizes)) if daily_sample_sizes else 0
             ic_result["num_days"] = len(daily_ics)

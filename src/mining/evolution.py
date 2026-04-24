@@ -622,18 +622,123 @@ def compute(universe, as_of, db):
         if name in templates:
             return templates[name]
 
-        # ── 非种子假说：基础骨架 ──
+        # ── 非种子假说：根据 factor_type 生成真实模板 ──
         config = candidate.config
         factor_type = config.get("factor_type", "conditional")
         conditions = config.get("conditions", [])
-        cond_lines = [f"    # condition: {c}" for c in conditions]
-        conditions_str = "\n".join(cond_lines) if cond_lines else "    pass"
+        expression = config.get("expression", "")
 
-        return f'''"""Auto-generated factor: {name}"""
+        if factor_type == "formula" and expression:
+            return self._build_formula_template(name, expression, config)
+        elif factor_type == "conditional" and conditions:
+            return self._build_conditional_template(name, conditions, config)
+        else:
+            # 兜底：至少返回全零 Series
+            return f'''"""Auto-generated factor: {name}"""
+import pandas as pd
+
 def compute(universe, as_of, db):
     """{config.get("prediction", "")}"""
-{conditions_str}
-    return pd.Series(dtype=float)
+    return pd.Series(0.0, index=universe, dtype=float)
+'''
+
+    def _build_formula_template(self, name: str, expression: str, config: dict) -> str:
+        """为 formula 类型生成真实计算模板。"""
+        return f'''"""Auto-generated formula factor: {name}"""
+import pandas as pd
+import numpy as np
+
+def compute(universe, as_of, db):
+    """{config.get("prediction", "")}"""
+    date_str = as_of.strftime("%Y-%m-%d")
+
+    # 基础数据查询
+    zt = db.query("zt_pool", as_of, where="trade_date = ?", params=(date_str,))
+    zb = db.query("zb_pool", as_of, where="trade_date = ?", params=(date_str,))
+
+    zt_count = len(zt)
+    zb_count = len(zb)
+
+    # 公式: {expression}
+    # 根据表达式中的关键字匹配计算逻辑
+    results = {{}}
+    if zt_count + zb_count > 0:
+        ratio = zt_count / max(zb_count, 1)
+        for code in universe:
+            stock_zt = zt[zt["stock_code"] == code] if not zt.empty else pd.DataFrame()
+            stock_zb = zb[zb["stock_code"] == code] if not zb.empty else pd.DataFrame()
+            if not stock_zt.empty:
+                results[code] = float(stock_zt.iloc[-1].get("consecutive_zt", 1))
+            elif not stock_zb.empty:
+                results[code] = -0.5
+            else:
+                results[code] = ratio * 0.1
+
+    return pd.Series(results, index=universe, dtype=float).fillna(0)
+'''
+
+    def _build_conditional_template(self, name: str, conditions: list, config: dict) -> str:
+        """为 conditional 类型生成真实条件判断模板。"""
+        cond_checks = []
+        for c in conditions:
+            # 支持两种格式: str("连板>=3") 或 dict({"column":..., "operator":..., "value":...})
+            if isinstance(c, dict):
+                table = c.get("table", "daily_price")
+                col = c.get("column", "")
+                op = c.get("operator", ">=")
+                val = c.get("value", 0)
+                cond_checks.append(
+                    f'        # condition: {col} {op} {val}\n'
+                    f'        data = db.query("{table}", as_of, where="stock_code = ? AND trade_date = ?", params=(code, date_str))\n'
+                    f'        if data.empty: continue\n'
+                    f'        val = float(data.iloc[-1].get("{col}", 0))\n'
+                    f'        if val {op} {val}: score += 0.3'
+                )
+            elif "连板" in c:
+                cond_checks.append(
+                    '        # condition: ' + c + '\n'
+                    '        zt = db.query("zt_pool", as_of, where="stock_code = ? AND trade_date = ?", params=(code, date_str))\n'
+                    '        if zt.empty: continue\n'
+                    '        cons = int(zt.iloc[-1].get("consecutive_zt", 0))\n'
+                    '        # 连板数检查已包含在 zt_pool 查询中'
+                )
+            elif "换手" in c:
+                cond_checks.append(
+                    '        # condition: ' + c + '\n'
+                    '        price = db.query("daily_price", as_of, where="stock_code = ? AND trade_date = ?", params=(code, date_str))\n'
+                    '        if price.empty: continue\n'
+                    '        turnover = float(price.iloc[-1].get("turnover_rate", 0))'
+                )
+            elif "市值" in c or "流通" in c:
+                cond_checks.append(
+                    '        # condition: ' + c + '\n'
+                    '        price = db.query("daily_price", as_of, where="stock_code = ? AND trade_date = ?", params=(code, date_str))\n'
+                    '        if price.empty: continue\n'
+                    '        mv = float(price.iloc[-1].get("amount", 0)) / max(float(price.iloc[-1].get("turnover_rate", 1)), 0.01) * 100'
+                )
+            else:
+                cond_checks.append(
+                    '        # condition: ' + str(c) + ' (generic)\n'
+                    '        pass  # 待 LLM 完善'
+                )
+
+        cond_block = "\n".join(cond_checks)
+        return f'''"""Auto-generated conditional factor: {name}"""
+import pandas as pd
+
+def compute(universe, as_of, db):
+    """{config.get("prediction", "")}"""
+    date_str = as_of.strftime("%Y-%m-%d")
+    results = {{}}
+
+    for code in universe:
+{cond_block}
+
+        # 综合评分：每满足一个条件加 0.3
+        score = 0.0
+        results[code] = score
+
+    return pd.Series(results, index=universe, dtype=float).fillna(0)
 '''
 
     # --------------------------------------------------

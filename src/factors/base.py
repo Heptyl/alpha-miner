@@ -83,7 +83,9 @@ class BaseFactor(ABC):
             return
 
         as_of_date = as_of.strftime("%Y-%m-%d")
-        max_date = data[date_col].max()
+        # 截取日期部分（兼容 "YYYY-MM-DD HH:MM" 格式）
+        date_values = data[date_col].astype(str).str[:10]
+        max_date = date_values.max()
         if max_date > as_of_date:
             raise FutureDataError(
                 f"Factor {self.name}: 发现未来数据！"
