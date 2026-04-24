@@ -34,3 +34,8 @@ markers = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src", "cli"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

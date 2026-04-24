@@ -69,6 +69,11 @@ dev = [
     { name = "pytest-cov" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "akshare", specifier = ">=1.10" },
@@ -85,6 +90,9 @@ requires-dist = [
     { name = "snownlp", specifier = ">=0.12" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "annotated-types"

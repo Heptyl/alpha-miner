@@ -328,7 +328,7 @@ class ReplayEngine:
                 (last_n,),
             ).fetchall()
             if not rows:
-                return {"total": 0, "regime_accuracy": 0.0, "avg_hits": 0.0}
+                return {"total": 0, "regime_accuracy": 0.0, "avg_hits": 0.0, "hit_rate": 0.0}
 
             regime_correct = sum(1 for r in rows if r["regime_match"])
             total_hits = sum(

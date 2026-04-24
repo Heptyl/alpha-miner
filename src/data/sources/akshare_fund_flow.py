@@ -10,6 +10,7 @@
 
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -22,7 +23,12 @@ from src.data.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-_THS_JS_PATH = Path(__file__).resolve().parents[3] / ".venv" / "lib" / "python3.11" / "site-packages" / "akshare" / "data" / "ths.js"
+_THS_JS_PATH = Path(__file__).resolve().parents[3] / ".venv" / "lib" / f"python3.{sys.version_info.minor}" / "site-packages" / "akshare" / "data" / "ths.js"
+if not _THS_JS_PATH.exists():
+    # Fallback: search for any python3.x in .venv/lib
+    _lib_dir = Path(__file__).resolve().parents[3] / ".venv" / "lib"
+    _found = list(_lib_dir.glob("python3.*/site-packages/akshare/data/ths.js"))
+    _THS_JS_PATH = _found[0] if _found else _THS_JS_PATH
 
 _HEADERS = {
     "User-Agent": (
