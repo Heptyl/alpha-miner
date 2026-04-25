@@ -29,6 +29,39 @@ def main():
         from scipy.stats import spearmanr
         from src.data.storage import Storage
 
+        # 回测模式：注入 BacktestStorage，所有 query 调用自动 bypass snapshot_time
+        # BacktestStorage 用 trade_date 做时间隔离（而非 snapshot_time）
+        _tables_with_trade_date = {"daily_price", "zt_pool", "zb_pool", "strong_pool",
+                                    "lhb_detail", "fund_flow", "news", "market_emotion",
+                                    "concept_daily", "factor_values", "ic_series"}
+        class BacktestStorage(Storage):
+            """回测专用 Storage — 用 trade_date 替代 snapshot_time 做时间隔离。"""
+            def query(self, table, as_of, where="", params=(), **kwargs):
+                date_str = as_of.strftime("%Y-%m-%d") if isinstance(as_of, datetime) else str(as_of)
+                if where and "trade_date" in where:
+                    # 已有 trade_date 条件，直接 bypass
+                    return super().query(table, as_of, where=where, params=params, bypass_snapshot=True)
+                elif table in _tables_with_trade_date:
+                    # 有 trade_date 列的表：加 trade_date <= as_of
+                    extra = f"trade_date <= '{date_str}'" + (f" AND ({where})" if where else "")
+                    return super().query(table, as_of, where=extra, params=params, bypass_snapshot=True)
+                else:
+                    # 无 trade_date 的表（如 concept_mapping）：只 bypass，不加日期过滤
+                    return super().query(table, as_of, where=where, params=params, bypass_snapshot=True)
+            def query_range(self, table, as_of, lookback_days, date_col="trade_date", where="", params=()):
+                start_date = (as_of - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+                end_date = as_of.strftime("%Y-%m-%d")
+                sql = f"SELECT * FROM {table} WHERE {date_col} >= ? AND {date_col} <= ?"
+                all_params = [start_date, end_date]
+                if where:
+                    sql += f" AND ({where})"
+                    all_params.extend(params)
+                conn = self._get_conn()
+                try:
+                    return pd.read_sql_query(sql, conn, params=all_params)
+                finally:
+                    conn.close()
+
         ns = {
             "__name__": f"factor_{factor_name}",
             "pd": pd,
@@ -37,7 +70,7 @@ def main():
             "numpy": np,
             "datetime": datetime,
             "timedelta": timedelta,
-            "Storage": Storage,
+            "Storage": BacktestStorage,
         }
         exec(compile(code, code_path, "exec"), ns)
 
@@ -45,8 +78,8 @@ def main():
             print(json.dumps({"error": "代码中未定义 compute(universe, as_of, db) 函数"}))
             return
 
-        # 构造测试参数
-        db = Storage(db_path)
+        # 构造测试参数（回测用 BacktestStorage 绕过 snapshot_time）
+        db = BacktestStorage(db_path)
 
         # ── 多日回测计算真实 IC ─────────────────────────────
         ic_window = 20  # 回测窗口（交易日）
@@ -85,7 +118,7 @@ def main():
                 if not price_df.empty:
                     break
 
-            universe = sorted(price_df["stock_code"].unique().tolist())[:100] if not price_df.empty else ["000001"]
+            universe = sorted(price_df["stock_code"].unique().tolist())[:500] if not price_df.empty else ["000001"]
             values = ns["compute"](universe, as_of, db)
 
             if values is not None and isinstance(values, pd.Series):
@@ -102,6 +135,18 @@ def main():
             return
 
         trade_dates.sort()  # 从早到晚
+        # 过滤：只保留连续段（相邻间隔<=3自然日），避免跨月fwd return失真
+        if len(trade_dates) > 1:
+            continuous = [trade_dates[0]]
+            for i in range(1, len(trade_dates)):
+                if (trade_dates[i] - trade_dates[i-1]).days <= 3:
+                    continuous.append(trade_dates[i])
+                else:
+                    # 取最长连续段
+                    if len(continuous) > len(trade_dates) // 2:
+                        break
+                    continuous = [trade_dates[i]]
+            trade_dates = continuous
 
         # 2. 滑动窗口计算 IC
         daily_ics = []
@@ -119,7 +164,7 @@ def main():
             if price_today.empty:
                 continue
 
-            universe = sorted(price_today["stock_code"].unique().tolist())[:100]
+            universe = sorted(price_today["stock_code"].unique().tolist())[:500]
 
             # 调用 compute
             try:

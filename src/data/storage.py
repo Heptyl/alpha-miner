@@ -75,19 +75,31 @@ class Storage:
         as_of: datetime,
         where: str = "",
         params: tuple = (),
+        bypass_snapshot: bool = False,
     ) -> pd.DataFrame:
         """时间隔离查询。
 
         自动注入 WHERE snapshot_time < as_of 条件，
         确保不会读取到 as_of 之后写入的数据。
-        """
-        as_of_str = as_of.strftime("%Y-%m-%d %H:%M:%S")
-        sql = f"SELECT * FROM {table} WHERE snapshot_time < ?"
-        all_params = [as_of_str]
 
-        if where:
-            sql += f" AND ({where})"
-            all_params.extend(params)
+        Args:
+            bypass_snapshot: True 时跳过 snapshot_time 过滤，仅用 where 条件。
+                用于回测场景：数据是后来采集的但 trade_date 是历史日期。
+        """
+        if bypass_snapshot:
+            if where:
+                sql = f"SELECT * FROM {table} WHERE ({where})"
+                all_params = list(params)
+            else:
+                sql = f"SELECT * FROM {table}"
+                all_params = []
+        else:
+            as_of_str = as_of.strftime("%Y-%m-%d %H:%M:%S")
+            sql = f"SELECT * FROM {table} WHERE snapshot_time < ?"
+            all_params = [as_of_str]
+            if where:
+                sql += f" AND ({where})"
+                all_params.extend(params)
 
         conn = self._get_conn()
         try:

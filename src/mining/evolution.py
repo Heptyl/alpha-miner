@@ -238,16 +238,15 @@ def compute(universe, as_of, db):
         if cons != 1:
             continue
 
-        # 封板未开过（seal_times == 1 或 open_times 不存在或为0）
-        seal_times = int(row.get("seal_times", 1))
-        open_times = int(row.get("open_times", 0))
+        # 封板未开过（open_count == 0 表示没开过板）
+        open_count = int(row.get("open_count", 0))
 
-        # 封单金额（越大越好）
-        seal_amt = float(row.get("seal_amount", 0))
+        # 封单金额（成交额）
+        seal_amt = float(row.get("amount", 0))
 
         # 综合评分
         score = 0.5
-        if seal_times <= 1 and open_times == 0:
+        if open_count == 0:
             score += 0.3  # 封板稳
         if seal_amt > 1e8:
             score += 0.2  # 封单大
@@ -304,7 +303,7 @@ def compute(universe, as_of, db):
                            params=(code, d))
             if zt.empty:
                 break
-            seals.append(float(zt.iloc[-1].get("seal_amount", 0)))
+            seals.append(float(zt.iloc[-1].get("amount", 0)))
 
         if len(seals) < 3:
             continue
