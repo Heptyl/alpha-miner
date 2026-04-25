@@ -210,10 +210,16 @@ def fetch_today(trade_date: str, retries: int = 3) -> pd.DataFrame:
 
 
 def fetch_history(trade_date: str, retries: int = 3) -> pd.DataFrame:
-    """拉取历史日K线 (backfill) — stock_zh_a_daily 逐只拉取.
+    """拉取历史日K线 (backfill) — 优先东财 stock_zh_a_hist，回退 stock_zh_a_daily.
 
     多线程加速，带限流 + 指数退避 + 连续失败检测。
     """
+    # 优先东财源（stock_zh_a_hist，稳定可用）
+    result = _fetch_hist_eastmoney(trade_date, retries)
+    if not result.empty:
+        return result
+    # 回退新浪源
+    logger.warning("stock_zh_a_hist 全部失败，回退 stock_zh_a_daily")
     return _fetch_daily_ak(trade_date, retries, multi_thread=True)
 
 
@@ -456,6 +462,98 @@ def _fetch_daily_ak(trade_date: str, max_retries: int = 3, multi_thread: bool = 
         return pd.DataFrame(results)
 
     logger.warning("stock_zh_a_daily 全部失败 (%d 只), 目标 %s", total_failed, trade_date)
+    return pd.DataFrame()
+
+
+def _fetch_hist_eastmoney(trade_date: str, max_retries: int = 3) -> pd.DataFrame:
+    """用 stock_zh_a_hist（东方财富源）逐只拉取日K线。
+
+    东财源比新浪源稳定，在国内网络环境下可用性更高。
+    多线程加速，带限流 + 连续失败检测。
+    """
+    import concurrent.futures
+    import threading
+
+    codes = _get_stock_codes()
+    if not codes:
+        logger.error("_fetch_hist_eastmoney: 无可用股票代码")
+        return pd.DataFrame()
+
+    results = []
+    consecutive_fail = 0
+    total_failed = 0
+    lock = threading.Lock()
+    date_str = trade_date.replace("-", "")
+    per_delay = 0.1  # 东财源限流较宽松
+
+    def _fetch_one(code: str) -> dict | None:
+        nonlocal consecutive_fail, total_failed
+
+        with lock:
+            if consecutive_fail >= _BATCH_FAILURE_THRESHOLD:
+                return None
+
+        time.sleep(per_delay)
+
+        for attempt in range(max_retries):
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=date_str,
+                    end_date=date_str,
+                    adjust="qfq",
+                )
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    with lock:
+                        consecutive_fail = 0
+                    return {
+                        "stock_code": code,
+                        "trade_date": trade_date,
+                        "open": float(row.get("开盘", 0) or 0),
+                        "high": float(row.get("最高", 0) or 0),
+                        "low": float(row.get("最低", 0) or 0),
+                        "close": float(row.get("收盘", 0) or 0),
+                        "volume": float(row.get("成交量", 0) or 0),
+                        "amount": float(row.get("成交额", 0) or 0),
+                        "turnover_rate": float(row.get("换手率", 0) or 0),
+                    }
+                return None
+            except Exception as e:
+                with lock:
+                    consecutive_fail += 1
+                    total_failed += 1
+                err_str = str(e).lower()
+                if any(kw in err_str for kw in ("403", "405", "forbidden", "waf", "rate limit")):
+                    time.sleep(min(2 ** (attempt + 1), 10))
+                else:
+                    return None
+
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, c): c for c in codes}
+        for future in concurrent.futures.as_completed(futures):
+            with lock:
+                if consecutive_fail >= _BATCH_FAILURE_THRESHOLD:
+                    logger.error(
+                        "连续失败 %d ≥ 阈值 %d，终止 stock_zh_a_hist",
+                        consecutive_fail, _BATCH_FAILURE_THRESHOLD,
+                    )
+                    for f in futures:
+                        f.cancel()
+                    break
+            result = future.result()
+            if result:
+                results.append(result)
+
+    if results:
+        logger.info("stock_zh_a_hist 获取 %d/%d 只 (目标 %s)",
+                     len(results), len(codes), trade_date)
+        return pd.DataFrame(results)
+
+    logger.warning("stock_zh_a_hist 全部失败 (%d 只), 目标 %s", total_failed, trade_date)
     return pd.DataFrame()
 
 
