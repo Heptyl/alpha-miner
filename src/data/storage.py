@@ -20,6 +20,7 @@ class Storage:
 
     def __init__(self, db_path: str = "data/alpha_miner.db"):
         self.db_path = db_path
+        self.backtest_mode = False  # True 时所有 query 自动 bypass snapshot_time 过滤
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -86,7 +87,7 @@ class Storage:
             bypass_snapshot: True 时跳过 snapshot_time 过滤，仅用 where 条件。
                 用于回测场景：数据是后来采集的但 trade_date 是历史日期。
         """
-        if bypass_snapshot:
+        if bypass_snapshot or self.backtest_mode:
             if where:
                 sql = f"SELECT * FROM {table} WHERE ({where})"
                 all_params = list(params)
@@ -126,8 +127,12 @@ class Storage:
         start_date = (as_of - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
         end_date = as_of.strftime("%Y-%m-%d")
 
-        sql = f"SELECT * FROM {table} WHERE snapshot_time < ? AND {date_col} >= ? AND {date_col} <= ?"
-        all_params = [as_of_str, start_date, end_date]
+        if self.backtest_mode:
+            sql = f"SELECT * FROM {table} WHERE {date_col} >= ? AND {date_col} <= ?"
+            all_params = [start_date, end_date]
+        else:
+            sql = f"SELECT * FROM {table} WHERE snapshot_time < ? AND {date_col} >= ? AND {date_col} <= ?"
+            all_params = [as_of_str, start_date, end_date]
 
         if where:
             sql += f" AND ({where})"

@@ -17,10 +17,10 @@ from src.factors.registry import FactorRegistry
 from src.drift.ic_tracker import ICTracker
 
 
-def get_universe(db: Storage, as_of: datetime) -> list[str]:
+def get_universe(db: Storage, as_of: datetime, bypass_snapshot: bool = False) -> list[str]:
     """获取 as_of 日的股票 universe。"""
     date_str = as_of.strftime("%Y-%m-%d")
-    df = db.query("daily_price", as_of, where="trade_date = ?", params=(date_str,))
+    df = db.query("daily_price", as_of, where="trade_date = ?", params=(date_str,), bypass_snapshot=bypass_snapshot)
     if df.empty:
         return []
     return sorted(df["stock_code"].unique().tolist())
@@ -96,6 +96,7 @@ def backtest_factor(
 ):
     """单因子回测 — 分组收益 + IC 时序。"""
     db = Storage(db_path)
+    db.backtest_mode = True  # 回测模式
     registry = FactorRegistry()
 
     try:
@@ -223,10 +224,11 @@ def backtest_factor(
 def compute_all(db_path: str = "data/alpha_miner.db"):
     """计算所有交易日的因子值并写入 factor_values 表。"""
     db = Storage(db_path)
+    db.backtest_mode = True  # 回测模式下忽略 snapshot_time 过滤
     registry = FactorRegistry()
 
-    # 从 zt_pool + daily_price 获取所有交易日
-    price_df = db.query("daily_price", datetime.now())
+    # 从 daily_price 获取所有交易日（bypass_snapshot 因为数据可能是后来采集的）
+    price_df = db.query("daily_price", datetime.now(), bypass_snapshot=True)
     if price_df.empty:
         print("[ERROR] daily_price 无数据")
         return
@@ -237,10 +239,8 @@ def compute_all(db_path: str = "data/alpha_miner.db"):
     total_rows = 0
     for idx, date_str in enumerate(trade_dates):
         as_of = datetime.strptime(date_str, "%Y-%m-%d")
-        # 用当天 23:59:59 确保覆盖当天采集的 snapshot_time
-        query_as_of = as_of.replace(hour=23, minute=59, second=59)
 
-        universe = get_universe(db, query_as_of)
+        universe = get_universe(db, as_of, bypass_snapshot=True)
         if not universe:
             print(f"  [{idx+1}/{len(trade_dates)}] {date_str}: 无行情数据，跳过")
             continue
@@ -253,7 +253,7 @@ def compute_all(db_path: str = "data/alpha_miner.db"):
         for name in registry.list_factors():
             factor = registry.get_factor(name)
             try:
-                values = factor.compute(universe, query_as_of, db)
+                values = factor.compute(universe, as_of, db)
             except Exception as e:
                 print(f"    {name}: ERROR - {e}")
                 continue

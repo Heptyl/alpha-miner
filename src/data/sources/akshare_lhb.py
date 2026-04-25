@@ -30,30 +30,35 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
             if df is None or df.empty:
                 return pd.DataFrame()
 
-            # 安全地构造 DataFrame，处理各种 akshare 返回格式
+            # stock_lhb_detail_em 返回汇总数据（非明细），列名：
+            # 代码, 名称, 上榜日, 解读, 收盘价, 涨跌幅,
+            # 龙虎榜净买额, 龙虎榜买入额, 龙虎榜卖出额, 龙虎榜成交额, ...
+            # 上榜原因, 上榜后N日...
+            # 注意：没有买入/卖出营业部明细
             result = pd.DataFrame()
             result["stock_code"] = df["代码"].values if "代码" in df.columns else []
             result["trade_date"] = trade_date
 
-            for col_src, col_dst in [
-                ("买入额", "buy_amount"),
-                ("卖出额", "sell_amount"),
-                ("净买入额", "net_amount"),
+            # 金额字段 — 优先用龙虎榜列名，回退通用列名
+            for col_srcs, col_dst in [
+                (["龙虎榜买入额", "买入额"], "buy_amount"),
+                (["龙虎榜卖出额", "卖出额"], "sell_amount"),
+                (["龙虎榜净买额", "净买入额"], "net_amount"),
             ]:
-                if col_src in df.columns:
-                    result[col_dst] = pd.to_numeric(df[col_src], errors="coerce").fillna(0).values
-                else:
-                    result[col_dst] = 0.0
+                val = 0.0
+                for cs in col_srcs:
+                    if cs in df.columns:
+                        val = pd.to_numeric(df[cs], errors="coerce").fillna(0).values
+                        break
+                result[col_dst] = val
 
-            for col_src, col_dst in [
-                ("买入营业部", "buy_depart"),
-                ("卖出营业部", "sell_depart"),
-                ("上榜原因", "reason"),
-            ]:
-                if col_src in df.columns:
-                    result[col_dst] = df[col_src].astype(str).fillna("").values
-                else:
-                    result[col_dst] = ""
+            # 上榜原因
+            result["reason"] = df["上榜原因"].astype(str).fillna("").values if "上榜原因" in df.columns else ""
+            # 汇总接口无营业部明细，留空
+            result["buy_depart"] = ""
+            result["sell_depart"] = ""
+            # 用序号区分同一股票多条记录，避免唯一约束冲突
+            result["_row_idx"] = range(len(result))
 
             return result
 
