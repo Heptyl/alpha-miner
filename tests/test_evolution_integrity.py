@@ -66,8 +66,19 @@ class TestEvolutionIntegrity:
 
     def test_knowledge_base_loads(self):
         """知识库至少有 4 个理论、10 个假说。"""
-        engine = EvolutionEngine(db_path=":memory:", api_client=None)
-        candidates = engine._generate_from_knowledge()
+        import tempfile, os
+        # 用空临时文件避免真实日志过滤掉假说
+        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        tmp.write(b"")
+        tmp.close()
+        try:
+            engine = EvolutionEngine(
+                db_path=":memory:", api_client=None,
+                mining_log_path=tmp.name,
+            )
+            candidates = engine._generate_from_knowledge()
+        finally:
+            os.unlink(tmp.name)
 
         assert len(candidates) >= 10, \
             f"知识库只生成了 {len(candidates)} 个候选，期望 >= 10"

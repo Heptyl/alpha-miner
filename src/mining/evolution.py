@@ -11,6 +11,8 @@ import yaml
 from src.mining.failure_analyzer import FailureAnalyzer
 from src.mining.mutator import FactorMutator
 from src.mining.sandbox import Sandbox
+from src.mining.surgery_table import FactorSurgeryTable
+from src.mining.backtester import FactorBacktester
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +170,42 @@ class EvolutionEngine:
                     config=config,
                 ))
 
+        # 历史反馈：跳过已多次失败的假说
+        failures = self._get_historical_failures()
+        if failures:
+            filtered = []
+            for c in candidates:
+                if c.name in failures and failures[c.name] >= 3:
+                    logger.info("跳过假说 %s: 已失败 %d 次", c.name, failures[c.name])
+                else:
+                    filtered.append(c)
+            candidates = filtered
+
         return candidates
+
+    def _get_historical_failures(self) -> dict[str, int]:
+        """读取 mining_log.jsonl，统计每个假说被拒绝的次数。"""
+        failure_counts: dict[str, int] = {}
+        if not self.mining_log_path.exists():
+            return failure_counts
+
+        try:
+            with open(self.mining_log_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not record.get("accepted", True) and "name" in record:
+                        name = record["name"]
+                        failure_counts[name] = failure_counts.get(name, 0) + 1
+        except OSError as e:
+            logger.warning("无法读取挖掘日志: %s", e)
+
+        return failure_counts
 
     # --------------------------------------------------
     # LLM 翻译（假说 → 代码）
@@ -745,7 +782,7 @@ def compute(universe, as_of, db):
     # --------------------------------------------------
 
     def _evaluate(self, candidate: Candidate):
-        """沙箱执行 + IC 回测。"""
+        """沙箱执行 + FactorBacktester 真实 IC 回测。"""
         # 先构建代码
         if not candidate.code:
             candidate.code = self._construct_factor(candidate)
@@ -754,21 +791,32 @@ def compute(universe, as_of, db):
             candidate.error = "代码生成失败"
             return
 
-        # 沙箱执行
+        # 沙箱执行（验证代码可执行）
         result = self.sandbox.execute(candidate.code, candidate.name)
 
         if result.get("error"):
             candidate.error = result["error"]
             return
 
-        # IC 评估
-        ic_result = result.get("ic_result", {})
-        candidate.evaluation = ic_result
+        # 使用 FactorBacktester 进行真实 IC 回测
+        compute_fn = self._extract_compute_fn(candidate.code)
+        if compute_fn is not None:
+            try:
+                from src.data.storage import Storage
+                db = Storage(self.db_path)
+                backtester = FactorBacktester(db)
+                bt_result = backtester.run(compute_fn, factor_name=candidate.name)
+                candidate.evaluation = bt_result.to_dict()
+            except Exception as e:
+                logger.warning("FactorBacktester 回测失败，回退到沙箱结果: %s", e)
+                candidate.evaluation = result.get("ic_result", {})
+        else:
+            candidate.evaluation = result.get("ic_result", {})
 
         # 验收判定
-        ic = ic_result.get("ic_mean", 0.0)
-        icir = ic_result.get("icir", 0.0)
-        win_rate = ic_result.get("win_rate", 0.0)
+        ic = candidate.evaluation.get("ic_mean", 0.0)
+        icir = candidate.evaluation.get("icir", 0.0)
+        win_rate = candidate.evaluation.get("win_rate", 0.0)
 
         candidate.accepted = (
             abs(ic) >= self.MIN_IC
@@ -781,15 +829,40 @@ def compute(universe, as_of, db):
     # --------------------------------------------------
 
     def _mutate_accepted(self, candidate: Candidate) -> list[Candidate]:
-        """对已验收因子做定向变异。"""
+        """对已验收因子做定向变异（使用手术台诊断）。"""
         if not candidate.evaluation:
             return []
 
-        diagnosis = self.failure_analyzer.analyze(candidate.name, candidate.evaluation)
-        mutations_config = self.mutator.mutate(candidate.config, {
+        # ---- 手术台分析 ----
+        surgery_report = None
+        ic_series = candidate.evaluation.get("ic_series", [])
+        if ic_series:
+            try:
+                surgery_table = FactorSurgeryTable()
+                surgery_report = surgery_table.analyze(ic_series, candidate.name)
+            except Exception as e:
+                logger.warning("手术台分析失败: %s", e)
+
+        # ---- 失败诊断（传入 surgery_report） ----
+        diagnosis = self.failure_analyzer.analyze(
+            candidate.name, candidate.evaluation, surgery_report=surgery_report,
+        )
+
+        # ---- 定向变异（传入手术台诊断信息） ----
+        mutation_details = {
             "diagnosis": diagnosis.diagnosis,
             "details": diagnosis.details,
-        })
+        }
+        # 将手术台的最佳 regime/emotion 信息传递给 mutator
+        if surgery_report is not None:
+            if surgery_report.best_regime:
+                mutation_details.setdefault("details", {})
+                mutation_details["details"]["best_regime"] = surgery_report.best_regime
+            if surgery_report.best_emotion:
+                mutation_details.setdefault("details", {})
+                mutation_details["details"]["best_emotion"] = surgery_report.best_emotion
+
+        mutations_config = self.mutator.mutate(candidate.config, mutation_details)
 
         results = []
         for mc in mutations_config:
@@ -800,6 +873,28 @@ def compute(universe, as_of, db):
                 generation=candidate.generation,
             ))
         return results
+
+    # --------------------------------------------------
+    # 辅助方法
+    # --------------------------------------------------
+
+    def _extract_compute_fn(self, code: str):
+        """从代码字符串中提取 compute 函数。
+
+        Args:
+            code: 包含 compute 函数定义的 Python 代码字符串
+
+        Returns:
+            compute 函数对象，或 None（提取失败时）
+        """
+        try:
+            import pandas as pd  # noqa: ensure available in namespace
+            namespace = {"pd": pd, "np": np}
+            exec(code, namespace)  # noqa: S102
+            return namespace.get("compute")
+        except Exception as e:
+            logger.warning("提取 compute 函数失败: %s", e)
+            return None
 
     # --------------------------------------------------
     # 杂交

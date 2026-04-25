@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.mining.surgery_table import SurgeryReport
+
 
 @dataclass
 class FailureDiagnosis:
@@ -26,16 +28,71 @@ class FailureAnalyzer:
         "noisy_but_directional", "reversed", "redundant", "inconsistent",
     ]
 
-    def analyze(self, factor_name: str, backtest_result: dict) -> FailureDiagnosis:
+    def analyze(
+        self,
+        factor_name: str,
+        backtest_result: dict,
+        surgery_report: SurgeryReport | None = None,
+    ) -> FailureDiagnosis:
         """分析失败原因。
 
         Args:
             factor_name: 因子名
             backtest_result: 包含 ic_mean, icir, avg_sample_per_day, max_correlation, ic_series 等
+            surgery_report: 可选的 SurgeryReport，若提供则优先使用其诊断
 
         Returns:
             FailureDiagnosis
         """
+        # ---- 手术台诊断优先 ----
+        if surgery_report is not None:
+            diag = surgery_report.diagnosis
+            if diag == "universally_effective":
+                # 因子已通过验收，不应出现在失败路径，走原有逻辑
+                pass
+            elif diag == "regime_dependent":
+                return FailureDiagnosis(
+                    diagnosis="regime_dependent",
+                    suggestion=(
+                        f"因子依赖特定市场状态 (best_regime={surgery_report.best_regime})，"
+                        "建议添加 regime 过滤条件，仅在该状态下启用"
+                    ),
+                    details={
+                        "best_regime": surgery_report.best_regime,
+                        "regime_breakdown": [
+                            {"regime": r.regime, "ic_mean": r.ic_mean, "icir": r.icir, "effective": r.effective}
+                            for r in surgery_report.regime_breakdown
+                        ],
+                    },
+                )
+            elif diag == "emotion_dependent":
+                return FailureDiagnosis(
+                    diagnosis="emotion_dependent",
+                    suggestion=(
+                        f"因子依赖特定情绪环境 (best_emotion={surgery_report.best_emotion})，"
+                        "建议添加 zt_count 条件过滤，仅在匹配的情绪区间启用"
+                    ),
+                    details={
+                        "best_emotion": surgery_report.best_emotion,
+                        "emotion_breakdown": [
+                            {"bucket": e.bucket, "ic_mean": e.ic_mean, "icir": e.icir, "effective": e.effective}
+                            for e in surgery_report.emotion_breakdown
+                        ],
+                    },
+                )
+            elif diag == "time_decayed":
+                return FailureDiagnosis(
+                    diagnosis="time_decayed",
+                    suggestion="因子存在明显时间衰减，建议缩短回看窗口并尝试反转方向",
+                    details={
+                        "time_decay": [
+                            {"segment": t.segment, "ic_mean": t.ic_mean, "sample_days": t.sample_days}
+                            for t in surgery_report.time_decay
+                        ],
+                    },
+                )
+            # no_signal → fall through to existing logic
+
         ic = backtest_result.get("ic_mean", 0.0)
         icir = backtest_result.get("icir", 0.0)
         sample = backtest_result.get("avg_sample_per_day", 0)

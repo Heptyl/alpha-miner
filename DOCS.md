@@ -57,16 +57,19 @@ alpha-miner/
 │   │   ├── daily_brief.py  #   盘后决策简报 (三大交付物)
 │   │   ├── daily_report.py #   传统日报
 │   │   └── report.py       #   漂移报告汇总
-│   ├── mining/             # 进化引擎
-│   │   ├── evolution.py    #   EvolutionEngine: 假说→代码→沙箱→IC 验收
-│   │   ├── mutator.py      #   假说变异 (交叉/参数微调/理论切换)
-│   │   ├── failure_analyzer.py #  失败因子诊断
+│   ├── mining/             # 进化引擎 v2
+│   │   ├── evolution.py    #   EvolutionEngine: 假说→回测→手术台→验收/变异
+│   │   ├── backtester.py   #   FactorBacktester: 真实逐日 Spearman IC 回测
+│   │   ├── surgery_table.py#   FactorSurgeryTable: 三分段诊断 + 黄金窗口
+│   │   ├── failure_analyzer.py #  失败因子诊断 (整合手术台)
+│   │   ├── mutator.py      #   定向变异 (11 种诊断 → 9 种变异操作)
+│   │   ├── candidate_pool.py # 候选池 (5 天观察期状态机)
 │   │   ├── sandbox.py      #   沙箱执行器
 │   │   ├── _sandbox_runner.py # 沙箱子进程 (BacktestStorage, 500 universe)
 │   │   └── prompts/        #   LLM Prompt
 │   │       ├── explore.md  #   探索新假说
 │   │       ├── construct.md #  假说→代码翻译
-│   │       └── analyze.md  #  失败分析
+│   │       └── analyze.md  #   失败分析
 │   ├── strategy/           # 策略子系统
 │   │   ├── schema.py       #   Strategy / EntryRule / ExitRule / PositionRule / Trade / StrategyReport
 │   │   ├── backtest_engine.py #  回测引擎 (T+1 / 多仓位 / regime 分组)
@@ -92,7 +95,7 @@ alpha-miner/
 │   ├── daily_run.sh        #   每日 7 步完整流程
 │   ├── hourly_mine.sh      #   定时进化挖掘
 │   └── compute_factors.py  #   因子计算脚本
-├── tests/                  # 261 tests
+├── tests/                  # 288 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -183,27 +186,196 @@ python -m cli replay --date 2024-06-16 --save    # 存入数据库
 python -m cli replay --stats                      # 准确率统计
 ```
 
-## 进化引擎
+## 进化引擎 v2
 
-LLM 驱动的因子挖掘闭环：
+v2 核心升级：用真实 IC 回测替换假沙箱评分，引入因子手术台做结构化诊断，定向变异替代随机变异，候选池做观察期过滤。
+
+### 整体流程
 
 ```
-知识库 (theories.yaml, 12 个假说)
-    ↓ 探索假说 (LLM explore prompt)
-假说配置 (name / prediction / conditions)
-    ↓ 代码翻译 (LLM construct prompt)
-因子代码 (compute(universe, as_of, db))
-    ↓ 沙箱执行 (BacktestStorage, trade_date 时间隔离)
-    ↓ universe 500 股票 × 20 日滑动窗口
-IC 验收 (Spearman IC > 0.03 且 ICIR > 0.5)
-    ↓ 通过 → 因子入库 (factors/ 目录)
-    ↓ 失败 → 失败分析 (LLM analyze prompt) → 变异 → 重试
+知识库种子 (theories.yaml, 12 个假说)
+    ↓ LLM/模板 → 代码翻译
+因子代码 → FactorBacktester (逐日 Spearman IC, ic_series 带 regime/zt_count)
+    ↓ ic_series → FactorSurgeryTable (三分段分析)
+    ↓
+  验收通过?
+    ├── YES → CandidatePool (5 天观察期 → promoted 入库)
+    └── NO  → FailureAnalyzer (整合手术台报告)
+              ↓ 诊断 (11 种类型)
+              FactorMutator (定向变异, 9 种操作)
+              ↓ 变异因子 → 重新回测
 ```
 
-- LLM 接口：Z.AI Anthropic 兼容端点
-- 沙箱：子进程隔离执行，预注入 `pd/datetime/Storage/BacktestStorage`
-- Prompt 三阶段：explore → construct → analyze
-- 连续段过滤：过滤非连续交易段 (间隔>3自然日)，避免跨月 fwd return 失真
+### Step 1: 真实回测器 (FactorBacktester)
+
+`src/mining/backtester.py`
+
+替代原来沙箱中的假评分，用真实市场数据逐日计算 Spearman IC。
+
+**核心方法**：`run(factor_config, universe, start_date, end_date) → BacktestResult`
+
+**BacktestResult 结构**：
+
+```python
+@dataclass
+class BacktestResult:
+    ic_mean: float          # 全期 IC 均值
+    ic_std: float           # IC 标准差
+    icir: float             # IC 均值 / IC 标准差
+    win_rate: float         # IC > 0 的比例
+    pnl_ratio: float        # 正 IC 均值 / |负 IC 均值|
+    sample_days: int        # 有效交易日数
+    ic_series: list[dict]   # 逐日 IC 明细
+```
+
+**ic_series 每条记录**：
+
+| 字段 | 说明 |
+|------|------|
+| date | 交易日期 |
+| ic | 当日 Spearman IC |
+| fwd_return_mean | 当日 forward return 均值 |
+| regime | 当日市场状态 |
+| zt_count | 当日涨停数 |
+
+**连续段过滤**：过滤非连续交易段（间隔>3自然日），避免跨月 fwd return 失真。
+
+**CLI 调用**：
+
+```bash
+python -m cli mine surgery --factor consecutive_board --days 60
+```
+
+### Step 2: 因子手术台 (FactorSurgeryTable)
+
+`src/mining/surgery_table.py`
+
+对因子 IC 做三分段结构化分析，回答"这个因子在什么条件下有效"。
+
+**三分段**：
+
+| 维度 | 分段方式 | 指标 |
+|------|---------|------|
+| Regime | board_rally / theme_rotation / low_volume / normal | IC 均值, ICIR, 有效天数 |
+| 情绪 | 按涨停数分桶 (weak/normal/strong) | IC 均值, ICIR |
+| 时间 | 前1/3 vs 中1/3 vs 后1/3 | IC 趋势 (衰减/稳定/增强) |
+
+**SurgeryReport 结构**：
+
+```python
+@dataclass
+class SurgeryReport:
+    overall: OverallIC           # 全局 IC/ICIR/胜率
+    regime_breakdown: list[RegimeIC]    # regime 分段
+    emotion_breakdown: list[EmotionIC]  # 情绪分段
+    time_breakdown: TimeIC              # 时间分段
+    golden_window: GoldenWindow | None  # 黄金窗口
+    diagnosis: str                      # 5 种诊断之一
+    details: dict                       # 诊断详情
+```
+
+**5 种诊断**：
+
+| 诊断 | 含义 | 触发条件 |
+|------|------|---------|
+| robust | 全局有效 | 全局 IC > 0.03 且 ICIR > 0.5 |
+| regime_dependent | 仅特定 regime 有效 | 某 regime ICIR > 1.0 但其他 ≤ 0.5 |
+| emotion_dependent | 仅特定情绪有效 | 某情绪桶 ICIR > 1.0 但其他 ≤ 0.5 |
+| time_decayed | IC 时间衰减 | 前1/3 IC > 后1/3 IC × 2 |
+| no_signal | 无有效信号 | 所有分段 ICIR ≤ 0.5 |
+
+**黄金窗口**：自动检测最佳 regime + 情绪组合。
+
+### Step 3: 失败分析器 + 定向变异
+
+`src/mining/failure_analyzer.py` + `src/mining/mutator.py`
+
+失败分析器整合手术台报告，输出 11 种诊断：
+
+| 诊断 | 触发 | 变异策略 |
+|------|------|---------|
+| too_strict | 样本过少 | 放宽阈值 (×0.8) 或移除最弱条件 |
+| too_loose | 信号太频繁 | 收紧阈值 (×1.2) 或补充条件 |
+| reversed | IC 方向反向 | 反转方向 |
+| wrong_direction | IC 显著为负 | 反转方向 + 扩大窗口 |
+| noisy_but_directional | IC 正但不稳定 | 加 regime 过滤 |
+| regime_dependent | 仅特定 regime 有效 | 加 regime 前置条件 (多变体) |
+| emotion_dependent | 仅特定情绪有效 | 加涨停数过滤 |
+| time_decayed | IC 衰减 | 缩短窗口 + 反转 |
+| redundant | 与已有因子高相关 | 差异化 |
+| inconsistent | IC 波动大 | 平滑 + regime 过滤 |
+| no_signal | IC 全段无效 | 方向反转 + 窗口调整 |
+
+**9 种变异操作** (每个变异都带 `mutation_type` 字段)：
+
+| 操作 | mutation_type | 说明 |
+|------|--------------|------|
+| `_loosen_thresholds` | loosen_thresholds | 阈值 × ratio (默认 0.8) |
+| `_tighten_thresholds` | tighten_thresholds | 阈值 × ratio (默认 1.2) |
+| `_remove_weakest_condition` | remove_condition | 移除最后一个条件 |
+| `_add_condition_from_knowledge` | add_condition | 从知识库补充条件 |
+| `_reverse_direction` | reverse_direction | 反转 direction 字段 + 设 reverse=True |
+| `_add_regime_filter` | regime_filter | 添加 regime 前置条件 |
+| `_change_lookback` | change_lookback | 调整 lookback_days |
+| `_add_smoothing` | smoothing | 添加平滑窗口 |
+| `_add_zt_count_filter` | zt_count_filter | 添加涨停数区间过滤 |
+| `_differentiate_from` | differentiate | 与相关因子做差异化 |
+
+### Step 4: 动态 Regime 权重
+
+`src/drift/daily_brief.py`
+
+盘后简报中 Regime → 因子权重从历史 IC 动态计算：
+
+```
+动态权重 = 某因子在当前 regime 的近 N 天 IC 均值
+```
+
+fallback 逻辑：动态权重无法计算时（数据不足）回退到硬编码权重表。
+
+### Step 5: 候选因子缓冲池
+
+`src/mining/candidate_pool.py`
+
+验收通过的因子不直接入库，先进候选池做 5 天观察期：
+
+**状态机**：
+
+```
+new → observing (首次达标)
+observing → promoted (连续 5 天达标)
+observing → rejected (任意一天不达标)
+```
+
+**CandidateFactor 数据结构**：
+
+| 字段 | 说明 |
+|------|------|
+| name | 因子名 |
+| config | 因子配置 |
+| first_seen | 首次达标日期 |
+| ic_history | 逐日 IC 记录 |
+| status | new / observing / promoted / rejected |
+
+### Step 6: 历史反馈
+
+`src/mining/evolution.py` 的 `_get_historical_failures()` 方法。
+
+进化引擎记住每个假说的失败历史。连续失败 ≥3 次的假说自动跳过，避免无限循环浪费。
+
+### Step 7: CLI 集成
+
+`cli/mine.py` 新增 `surgery` 子命令：
+
+```bash
+# 对指定因子做手术台分析
+python -m cli mine surgery --factor consecutive_board --days 60
+
+# 指定日期范围
+python -m cli mine surgery --factor theme_lifecycle --start 2026-01-01 --end 2026-03-31
+```
+
+输出：SurgeryReport 的格式化文本（三分段 IC + 诊断 + 建议）。
 
 ## 策略子系统
 
@@ -336,7 +508,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试 (261 tests)
+## 测试 (288 tests)
 
 ### 硬断言测试 (47 个)
 
@@ -348,6 +520,14 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | test_hard_ic | IC 端到端 (完美正/负相关、手工 Spearman、持久化、边界) | 7 |
 | test_hard_evolution | 进化引擎验收判定、阈值、序列化、变异/杂交 | 13 |
 | test_template_factors | 进化引擎 11 个种子模板因子可执行性 | 11 |
+
+### v2 新增测试
+
+| 测试文件 | 覆盖 |
+|----------|------|
+| test_backtester | FactorBacktester 逐日 IC 计算、ic_series 结构、连续段过滤 (4 tests) |
+| test_surgery_table | 因子手术台三分段分析、诊断分类、黄金窗口检测 (24 tests) |
+| test_evolution_integrity | 进化完整性：阈值非零、IC=0 拒绝、知识库加载 (5 tests) |
 
 ### 其他测试文件
 
@@ -370,7 +550,6 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | test_strategy_evolver | 策略进化器 |
 | test_strategy_store | 策略持久化 |
 | test_daily_report | 日报生成 |
-| test_evolution_integrity | 进化完整性 |
 | test_external_deps | 外部依赖 |
 | test_factor_robustness | 因子鲁棒性 |
 | test_cli_smoke | CLI 冒烟测试 |
@@ -438,6 +617,7 @@ evolution:
 | BUILD_LOG.md | 完整构建过程记录 |
 | CLAUDE.md | Claude Code 协作指南 |
 | DOCS.md | 本文档 |
+| evolution-engine-v2-upgrade.md | 进化引擎 v2 升级规划文档 |
 | config/factors.yaml | 因子注册配置 |
 | config/settings.yaml | 全局配置 |
 | knowledge_base/theories.yaml | 行为金融学理论库 (12 个假说) |

@@ -267,6 +267,85 @@ class DailyBrief:
     # 交付物二：候选决策卡片
     # ================================================================
 
+    def _compute_dynamic_regime_weights(
+        self, as_of: datetime, regime: str
+    ) -> dict[str, float]:
+        """Compute dynamic regime weights based on recent IC performance.
+
+        For each registered factor, uses recent IC mean as base weight,
+        disables factors with negative IC (< -0.01), adjusts by the
+        hardcoded REGIME_WEIGHTS prior, and normalizes to sum to ~1.0.
+
+        Falls back to hardcoded REGIME_WEIGHTS if insufficient data
+        (< 10 days of IC history) or any error occurs.
+        """
+        try:
+            hardcoded = REGIME_WEIGHTS.get(regime, {})
+
+            # If regime has no hardcoded weights (e.g. "low_volume", "normal"),
+            # return empty dict — same as before.
+            if not hardcoded:
+                return hardcoded
+
+            factor_names = self.registry.list_factors()
+            if not factor_names:
+                return hardcoded
+
+            raw_weights: dict[str, float] = {}
+            sufficient_data = True
+            days_threshold = 10
+
+            for name in factor_names:
+                # Only compute dynamic weights for factors present in
+                # the hardcoded regime config.
+                if name not in hardcoded:
+                    continue
+
+                # Retrieve IC history through time-isolated query.
+                ic_df = self.db.query(
+                    "ic_series", as_of,
+                    where="factor_name = ?",
+                    params=(name,),
+                )
+
+                if ic_df is None or ic_df.empty or len(ic_df) < days_threshold:
+                    sufficient_data = False
+                    break
+
+                # Use the most recent IC values; compute mean.
+                ic_series = ic_df["ic_value"] if "ic_value" in ic_df.columns else pd.Series(dtype=float)
+                if len(ic_series) < days_threshold:
+                    sufficient_data = False
+                    break
+
+                ic_mean = float(ic_series.tail(days_threshold).mean())
+                if np.isnan(ic_mean):
+                    ic_mean = 0.0
+
+                # Negative IC in current regime → disable factor.
+                if ic_mean < -0.01:
+                    raw_weights[name] = 0.0
+                else:
+                    base_weight = abs(ic_mean)
+                    # Multiply by hardcoded prior for this regime.
+                    prior = hardcoded.get(name, 1.0)
+                    raw_weights[name] = base_weight * prior
+
+            if not sufficient_data:
+                return dict(hardcoded)
+
+            # Normalize so weights sum to ~1.0.
+            total = sum(raw_weights.values())
+            if total <= 0:
+                return dict(hardcoded)
+
+            normalized = {k: v / total for k, v in raw_weights.items()}
+            return normalized
+
+        except Exception:
+            # Any error → fall back to hardcoded weights.
+            return dict(REGIME_WEIGHTS.get(regime, {}))
+
     def build_candidates(
         self,
         as_of: datetime,
@@ -278,9 +357,9 @@ class DailyBrief:
             from datetime import timedelta
             report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # 1. 获取 regime 权重
+        # 1. 获取 regime 权重（动态计算，不足时回退到硬编码）
         regime_info = self.regime_detector.detect(as_of)
-        rw = REGIME_WEIGHTS.get(regime_info.regime, {})
+        rw = self._compute_dynamic_regime_weights(as_of, regime_info.regime)
 
         # 2. 收集所有有效因子的截面值和 IC
         factor_names = self.registry.list_factors()

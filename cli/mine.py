@@ -6,6 +6,7 @@
   python -m cli.mine mutate --factor cascade_momentum --rounds 5
   python -m cli.mine history
   python -m cli.mine lineage --factor xxx
+  python -m cli.mine surgery --factor consecutive_board --days 60
 """
 
 import argparse
@@ -16,9 +17,13 @@ from pathlib import Path
 
 import yaml
 
+from src.data.storage import Storage
+from src.factors.registry import FactorRegistry
+from src.mining.backtester import FactorBacktester
 from src.mining.evolution import EvolutionEngine, Candidate
 from src.mining.failure_analyzer import FailureAnalyzer
 from src.mining.mutator import FactorMutator
+from src.mining.surgery_table import FactorSurgeryTable
 
 
 def _build_llm_client():
@@ -244,6 +249,125 @@ def cmd_lineage(args):
         print(f"  Gen {gen} | {accepted} | {source:<12} | IC={ic:.4f} | {r.get('name', '')}{parents}")
 
 
+def cmd_surgery(args):
+    """因子手术台 — 解剖因子IC序列，诊断有效性来源。"""
+    factor_name = args.factor
+    lookback_days = args.days
+    ic_threshold = args.threshold
+
+    # 1. 创建 Storage 和 Backtester
+    db = Storage(db_path=args.db)
+    backtester = FactorBacktester(db=db)
+
+    # 2. 从因子注册表查找因子
+    registry = FactorRegistry()
+    try:
+        factor = registry.get_factor(factor_name)
+    except KeyError as e:
+        print(f"[ERROR] {e}")
+        print(f"[INFO] 可用因子: {', '.join(registry.list_factors())}")
+        sys.exit(1)
+
+    compute_fn = factor.compute
+
+    # 3. 运行回测
+    print(f"[INFO] 因子手术台: {factor_name}")
+    print(f"[INFO] 回测窗口: {lookback_days} 天, IC阈值: {ic_threshold}")
+    print()
+
+    result = backtester.run(compute_fn, factor_name, lookback_days=lookback_days)
+
+    # 4. 检查回测错误
+    if result.error:
+        print(f"[ERROR] 回测失败: {result.error}")
+        sys.exit(1)
+
+    # 5. 运行手术台分析
+    surgery = FactorSurgeryTable()
+    report = surgery.analyze(result.ic_series, factor_name, ic_threshold)
+
+    # 6. 打印报告
+    print(f"{'='*60}")
+    print(f"  因子手术台报告: {report.factor_name}")
+    print(f"{'='*60}\n")
+
+    # 整体 IC / ICIR
+    print(f"  整体 IC:   {report.overall_ic:+.4f}")
+    print(f"  整体 ICIR: {report.overall_icir:+.4f}")
+    print()
+
+    # Regime 分段
+    if report.regime_breakdown:
+        print(f"  {'='*55}")
+        print(f"  市场状态分段 (Regime Breakdown)")
+        print(f"  {'='*55}")
+        print(f"  {'Regime':<16} {'IC均值':>8} {'ICIR':>8} {'天数':>6} {'有效':>6}")
+        print(f"  {'-'*50}")
+        for r in report.regime_breakdown:
+            eff = "✓" if r.effective else "✗"
+            print(f"  {r.regime:<16} {r.ic_mean:>+8.4f} {r.icir:>+8.4f} {r.sample_days:>6} {eff:>6}")
+        print()
+
+    # 情绪分段
+    if report.emotion_breakdown:
+        print(f"  {'='*55}")
+        print(f"  情绪分段 (Emotion Breakdown)")
+        print(f"  {'='*55}")
+        print(f"  {'情绪桶':<16} {'IC均值':>8} {'ICIR':>8} {'天数':>6} {'有效':>6}")
+        print(f"  {'-'*50}")
+        bucket_labels = {"strong": "强势", "normal": "正常", "weak": "弱势"}
+        for e in report.emotion_breakdown:
+            eff = "✓" if e.effective else "✗"
+            label = bucket_labels.get(e.bucket, e.bucket)
+            print(f"  {label:<16} {e.ic_mean:>+8.4f} {e.icir:>+8.4f} {e.sample_days:>6} {eff:>6}")
+        print()
+
+    # 时间分段对比
+    if report.time_decay:
+        print(f"  {'='*55}")
+        print(f"  时间分段对比 (Time Decay)")
+        print(f"  {'='*55}")
+        print(f"  {'时间段':<16} {'IC均值':>8} {'天数':>6}")
+        print(f"  {'-'*35}")
+        seg_labels = {"first_half": "前半段", "second_half": "后半段"}
+        for t in report.time_decay:
+            label = seg_labels.get(t.segment, t.segment)
+            print(f"  {label:<16} {t.ic_mean:>+8.4f} {t.sample_days:>6}")
+        print()
+
+    # 黄金窗口
+    if report.golden_windows:
+        print(f"  {'='*55}")
+        print(f"  黄金窗口 (Golden Windows)")
+        print(f"  {'='*55}")
+        print(f"  {'起始日':<14} {'结束日':<14} {'Regime':<14} {'平均IC':>8}")
+        print(f"  {'-'*55}")
+        for w in report.golden_windows:
+            print(f"  {w.start_date:<14} {w.end_date:<14} {w.regime:<14} {w.avg_ic:>+8.4f}")
+        print()
+
+    # 诊断 + 建议
+    diagnosis_labels = {
+        "universally_effective": "全局有效",
+        "regime_dependent": "依赖市场状态",
+        "emotion_dependent": "依赖情绪环境",
+        "time_decayed": "时间衰减",
+        "no_signal": "无信号",
+    }
+    diag_label = diagnosis_labels.get(report.diagnosis, report.diagnosis)
+    print(f"  {'='*55}")
+    print(f"  诊断结果")
+    print(f"  {'='*55}")
+    print(f"  类型: {diag_label}")
+    if report.best_regime:
+        print(f"  最佳市场状态: {report.best_regime}")
+    if report.best_emotion:
+        emotion_label = bucket_labels.get(report.best_emotion, report.best_emotion)
+        print(f"  最佳情绪环境: {emotion_label}")
+    print(f"  建议: {report.suggestion}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alpha Miner 挖掘工具")
     parser.add_argument("--db", type=str, default="data/alpha_miner.db", help="数据库路径")
@@ -270,6 +394,12 @@ def main():
     p_lineage = subparsers.add_parser("lineage", help="查看因子家谱")
     p_lineage.add_argument("--factor", type=str, required=True, help="因子名")
 
+    # surgery
+    p_surgery = subparsers.add_parser("surgery", help="因子手术台 — 解剖IC序列，诊断有效性来源")
+    p_surgery.add_argument("--factor", type=str, required=True, help="因子名")
+    p_surgery.add_argument("--days", type=int, default=60, help="回测窗口天数 (默认60)")
+    p_surgery.add_argument("--threshold", type=float, default=0.03, help="IC诊断阈值 (默认0.03)")
+
     args = parser.parse_args()
 
     if args.command == "evolve":
@@ -282,6 +412,8 @@ def main():
         cmd_history(args)
     elif args.command == "lineage":
         cmd_lineage(args)
+    elif args.command == "surgery":
+        cmd_surgery(args)
     else:
         parser.print_help()
 

@@ -11,7 +11,7 @@ alpha-miner/
 ├── cli/                    # CLI 入口 (python -m cli <command>)
 │   ├── collect.py          #   数据采集
 │   ├── report.py           #   日报 + 盘后简报 + 市场剧本
-│   ├── mine.py             #   因子进化挖掘
+│   ├── mine.py             #   因子进化挖掘 + 手术台 CLI
 │   ├── drift.py            #   漂移检测
 │   ├── backtest.py         #   单因子回测
 │   ├── replay.py           #   复盘引擎
@@ -20,15 +20,15 @@ alpha-miner/
 │   ├── data/               # 数据层 (Storage + 6 个 akshare 采集器)
 │   ├── factors/            # 因子库 (5 公式 + 4 叙事)
 │   ├── narrative/          # 叙事引擎 (新闻分类/剧本/复盘)
-│   ├── drift/              # 漂移检测 + 决策输出
-│   ├── mining/             # 进化引擎 (假说→代码→沙箱→IC 验收)
-│   ├── strategy/           # 策略子系统 (回测/进化/持久化)
-│   └── pipeline/           # IC 管线 (批量计算 + 持久化)
+│   ├── drift/              #   漂移检测 + 决策输出 (含动态 Regime 权重)
+│   ├── mining/             #   进化引擎 v2 (手术台+真实IC+定向变异+候选池)
+│   ├── strategy/           #   策略子系统 (回测/进化/持久化)
+│   └── pipeline/           #   IC 管线 (批量计算 + 持久化)
 ├── factors/                # 进化产出的因子代码 (6 个已验收)
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
 ├── config/                 # factors.yaml + settings.yaml
 ├── scripts/                # daily_run.sh + hourly_mine.sh
-├── tests/                  # 261 tests
+├── tests/                  # 288 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -55,6 +55,32 @@ alpha-miner/
 
 验收标准：IC > 0.03, ICIR > 0.5, 胜率 > 55%, 盈亏比 > 1.2
 
+## 进化引擎 v2
+
+```
+知识库种子 (12 假说)
+    ↓ LLM/模板 → 代码翻译
+因子代码 → 真实回测 (FactorBacktester, 逐日 Spearman IC)
+    ↓ 带 regime/zt_count 的 ic_series
+因子手术台 (三分段分析 + 黄金窗口 + 诊断)
+    ↓ 验收通过 → 候选池 (5天观察期)
+    ↓ 失败 → 定向变异 (手术台驱动) → 重试
+```
+
+核心升级：
+- **真实回测器**：替换假沙箱 IC，逐日计算 Spearman IC，带 regime/zt_count 上下文
+- **因子手术台**：regime/情绪/时间三分段 IC 分析 + 黄金窗口检测 + 5种诊断
+- **定向变异**：基于手术台诊断做 regime 过滤/情绪过滤/方向反转/窗口调整
+- **候选池**：5 天观察期，连续达标才入库
+- **历史反馈**：失败≥3次的假说自动跳过
+- **动态权重**：Regime 权重从历史 IC 动态计算，硬编码值作 fallback
+
+CLI 手术台：
+
+```bash
+python -m cli mine surgery --factor consecutive_board --days 60
+```
+
 ## 叙事引擎
 
 ### 新闻分类器 (7 类)
@@ -79,18 +105,6 @@ python -m cli replay --date $DATE [--llm] --save    # 复盘
 python -m cli replay --stats                         # 准确率统计
 ```
 
-## 进化引擎
-
-```
-知识库 (theories.yaml, 12 假说)
-    ↓ LLM 探索假说
-假说配置 → 代码翻译 → 沙箱执行 (BacktestStorage, trade_date 隔离)
-    ↓ IC 验收通过 → 因子入库
-    ↓ 失败 → 诊断 → 变异 → 重试
-```
-
-LLM 接口：Z.AI Anthropic 兼容端点。沙箱子进程隔离，Prompt 三阶段：explore → construct → analyze。已产出 6 个因子存于 `factors/` 目录。
-
 ## 策略子系统
 
 5 个预置策略，定义在 `knowledge_base/strategies.yaml`：
@@ -102,8 +116,6 @@ LLM 接口：Z.AI Anthropic 兼容端点。沙箱子进程隔离，Prompt 三阶
 | 情绪冰点_反弹首板 | emotion_regime |
 | 三班组回避 | three_shift |
 | 连板接力_情绪共振 | herd_effect |
-
-回测引擎支持 T+1 约束、多仓位管理、regime 分组统计。进化器支持网格搜索多目标优化。
 
 ```bash
 python -m cli strategy list                                          # 列出策略
@@ -120,14 +132,6 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 2. **候选决策卡片** — Top N 评分 + 因子贡献进度条 + 反向视角
 3. **持仓风险预警** — 三班组检测 / 资金流背离 / 换手率安全线 / 题材拥挤度
 
-| 情绪 | 建议 | 仓位 |
-|------|------|------|
-| 极弱 | 休息 | 0% |
-| 弱 | 谨慎 | 20% |
-| 中性 | 可操作 | 40% |
-| 偏强 | 积极 | 60% |
-| 强 | 重仓 | 80% |
-
 ## 漂移检测
 
 | 模块 | 功能 |
@@ -136,23 +140,9 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 数据库 (20 张表)
+## 测试 (288 tests)
 
-daily_price, zt_pool, zb_pool, strong_pool, lhb_detail, fund_flow, concept_mapping, concept_daily, news, market_emotion, factor_values, ic_series, drift_events, regime_state, mining_log, market_scripts, replay_log, strategy_defs, strategy_reports, strategy_trades
-
-## 测试 (261 tests)
-
-硬断言测试 47 个：手工构造数据集 + 精确期望值，覆盖叙事因子 (16) / IC 端到端 (7) / 进化引擎 (13) / 模板因子 (11)。
-
-已修复生产 Bug：validate_no_future 误报、ICIR 除零、回测 snapshot_time 隔离失败、涨停因子字段名错误。
-
-## 技术要点
-
-- **时间隔离**：Storage 层 snapshot_time 隔离；回测用 BacktestStorage + trade_date
-- **因子注册**：FactorRegistry 自动扫描 BaseFactor 子类
-- **情感引擎**：金融关键词规则引擎替代 snownlp
-- **新闻分类**：规则引擎 + LLM fallback，高置信度跳过 LLM
-- **LLM 可选**：llm_client=None 走纯规则路径，系统照常运行
+硬断言测试 47 个 + 手术台测试 24 个 + 回测器测试 4 个 + 进化完整性测试 5 个。覆盖叙事因子/IC端到端/进化引擎/模板因子/手术台诊断/定向变异。
 
 ## Quick Start
 
@@ -166,9 +156,9 @@ uv run python -m cli collect --today             # 1. 采集
 uv run python -m cli backtest --compute-today     # 2. 因子计算
 uv run python -m cli drift --date $DATE           # 3. 漂移检测
 uv run python -m cli mine evolve                  # 4. 因子进化
-uv run python -m cli report --date $DATE          # 5. 日报
-uv run python -m cli script --date $DATE --save   # 6. 剧本
-uv run python -m cli replay --date $DATE --save   # 7. 复盘
+uv run python -m cli mine surgery --factor X --days 60  # 5. 手术台
+uv run python -m cli report --date $DATE          # 6. 日报
+uv run python -m cli script --date $DATE --save   # 7. 剧本
 
 uv run python -m cli report --brief               # 盘后简报
 ```
