@@ -2,17 +2,20 @@
 import subprocess
 import sys
 
+import os
+
 import pytest
 
 
 def run_cli(*args, timeout=10):
     """运行 CLI 命令，返回 (exit_code, stdout, stderr)。"""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = subprocess.run(
         [sys.executable, "-m", "cli"] + list(args),
         capture_output=True,
         text=True,
         timeout=timeout,
-        cwd="/home/leigeng/projects/alpha-miner",
+        cwd=project_root,
     )
     return result.returncode, result.stdout, result.stderr
 

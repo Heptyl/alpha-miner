@@ -1,6 +1,7 @@
-"""换手率排名 — 股票级因子。
+"""换手率/成交量排名 — 股票级因子。
 
-换手率百分位排名（全市场），衡量资金关注度。
+优先用换手率百分位排名（全市场），衡量资金关注度。
+若换手率数据不可用（如腾讯源），则用成交额排名替代。
 """
 
 from datetime import datetime
@@ -14,7 +15,7 @@ from src.factors.base import BaseFactor, dedup_latest
 class TurnoverRankFactor(BaseFactor):
     name = "turnover_rank"
     factor_type = "stock"
-    description = "换手率百分位排名 — 资金关注度"
+    description = "换手率/成交额百分位排名 — 资金关注度"
     lookback_days = 1
 
     def compute(self, universe: list[str], as_of: datetime, db: Storage) -> pd.Series:
@@ -29,13 +30,23 @@ class TurnoverRankFactor(BaseFactor):
         price_df = dedup_latest(price_df)
         self.validate_no_future(as_of, price_df, date_col="trade_date")
 
-        if price_df.empty or "turnover_rate" not in price_df.columns:
+        if price_df.empty:
             return pd.Series(0.0, index=universe, name=self.name)
 
-        # 全市场换手率百分位排名
-        all_turnover = price_df.set_index("stock_code")["turnover_rate"]
-        all_turnover = pd.to_numeric(all_turnover, errors="coerce").fillna(0)
-        ranks = all_turnover.rank(pct=True)
+        # 优先用换手率，其次用成交额，最后用成交量
+        metric = None
+        for col in ["turnover_rate", "amount", "volume"]:
+            if col in price_df.columns:
+                vals = pd.to_numeric(price_df.set_index("stock_code")[col], errors="coerce").fillna(0)
+                # 检查是否有区分度（不全是同一个值）
+                if vals.nunique() > 1:
+                    metric = vals
+                    break
+
+        if metric is None:
+            return pd.Series(0.5, index=universe, name=self.name)
+
+        ranks = metric.rank(pct=True)
 
         # 映射到 universe
         return pd.Series(

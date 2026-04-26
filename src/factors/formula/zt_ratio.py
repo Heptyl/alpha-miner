@@ -41,8 +41,13 @@ class ZtDtRatioFactor(BaseFactor):
             today_str = as_of.strftime("%Y-%m-%d")
             today_data = daily_df[daily_df["trade_date"] == today_str]
             if not today_data.empty and "open" in today_data.columns and "close" in today_data.columns:
-                # 跌停判断：跌幅 < -9.5%（排除 ST 后改为 -4.5%）
-                pct_change = (today_data["close"] - today_data["open"]) / today_data["open"] * 100
+                # 跌停判断：用 pre_close 算跌幅，若 pre_close 不可用则用 open
+                if "pre_close" in today_data.columns:
+                    pc = today_data["pre_close"]
+                    denom_col = pc.where(pc > 0, today_data["open"])
+                else:
+                    denom_col = today_data["open"]
+                pct_change = (today_data["close"] - denom_col) / denom_col * 100
                 dt_count = int((pct_change < -9.5).sum())
 
         denom = zt_count + dt_count
