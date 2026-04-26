@@ -40,6 +40,9 @@ if __name__ == "__main__":
     elif sub == "strategy":
         from cli.strategy import main
         main()
+    elif sub == "signal":
+        from cli.signal import main
+        main()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()
@@ -52,6 +55,7 @@ if __name__ == "__main__":
         print("  script    生成市场剧本")
         print("  replay    复盘昨日剧本")
         print("  strategy  策略管理 (list/backtest/evolve/scan)")
+        print("  signal    次日选股信号")
     else:
         print(f"Unknown command: {sub}")
         sys.exit(1)
