@@ -1,0 +1,310 @@
+{
+  "trade_date": "2026-04-28",
+  "zt_count": 60,
+  "dt_count": 1,
+  "market_regime": "强势市场",
+  "hot_industries": [
+    {
+      "industry": "通用设备",
+      "zt_count": 6,
+      "max_consecutive": 2
+    },
+    {
+      "industry": "装修装饰",
+      "zt_count": 6,
+      "max_consecutive": 2
+    },
+    {
+      "industry": "电力",
+      "zt_count": 6,
+      "max_consecutive": 4
+    },
+    {
+      "industry": "专用设备",
+      "zt_count": 6,
+      "max_consecutive": 2
+    },
+    {
+      "industry": "通信设备",
+      "zt_count": 4,
+      "max_consecutive": 2
+    }
+  ],
+  "hot_concepts": [
+    "半导体",
+    "电池",
+    "专用设备",
+    "电网设备",
+    "通用设备"
+  ],
+  "stocks": [
+    {
+      "stock_code": "600726",
+      "stock_name": "华电能源",
+      "industry": "电力",
+      "concepts": [
+        "电力"
+      ],
+      "composite_score": 0.814,
+      "signal_level": "A",
+      "consecutive_zt": 4,
+      "buy_zone_low": 6.95,
+      "buy_zone_high": 7.72,
+      "buy_price": 7.06,
+      "stop_loss": 6.67,
+      "target_price": 7.41,
+      "factor_scores": {
+        "consecutive_board": 4.0,
+        "main_flow_intensity": 0.0,
+        "turnover_rank": 0.999,
+        "lhb_institution": -98322260.7,
+        "theme_lifecycle": 0.0,
+        "narrative_velocity": 0.0,
+        "theme_crowding": 0.917,
+        "leader_clarity": 1.0,
+        "momentum_score": 1.0,
+        "volume_ratio": 0.45
+      },
+      "technical": {
+        "stock_code": "600726",
+        "current_price": 7.02,
+        "ma5": 5.85,
+        "ma10": 5.23,
+        "ma20": 5.22,
+        "support_price": 5.85,
+        "resistance_price": 7.02,
+        "atr": 0.42,
+        "volume_ratio": 1.35,
+        "momentum_score": 1.0,
+        "buy_zone_low": 6.47,
+        "buy_zone_high": 6.55,
+        "trend": "上涨"
+      },
+      "fund_net_amount": 0.0,
+      "reasons": [
+        "4连板，市场辨识度高",
+        "龙头地位清晰(1.00)",
+        "板块资金扎堆(0.92)",
+        "动量强劲(1.00)",
+        "均线多头排列"
+      ],
+      "risks": [
+        "大盘股，连板持续性存疑",
+        "换手率极高，获利盘压力大"
+      ]
+    },
+    {
+      "stock_code": "600152",
+      "stock_name": "维科技术",
+      "industry": "电池",
+      "concepts": [
+        "电池"
+      ],
+      "composite_score": 0.741,
+      "signal_level": "A",
+      "consecutive_zt": 3,
+      "buy_zone_low": 15.53,
+      "buy_zone_high": 17.26,
+      "buy_price": 15.77,
+      "stop_loss": 14.91,
+      "target_price": 16.56,
+      "factor_scores": {
+        "consecutive_board": 3.0,
+        "main_flow_intensity": 0.0,
+        "turnover_rank": 0.905,
+        "lhb_institution": 0.0,
+        "theme_lifecycle": 0.0,
+        "narrative_velocity": 0.0,
+        "theme_crowding": 0.917,
+        "leader_clarity": 1.0,
+        "momentum_score": 1.0,
+        "volume_ratio": 0.223
+      },
+      "technical": {
+        "stock_code": "600152",
+        "current_price": 15.69,
+        "ma5": 13.45,
+        "ma10": 13.28,
+        "ma20": 11.75,
+        "support_price": 13.45,
+        "resistance_price": 15.69,
+        "atr": 1.29,
+        "volume_ratio": 0.67,
+        "momentum_score": 1.0,
+        "buy_zone_low": 14.65,
+        "buy_zone_high": 14.84,
+        "trend": "上涨"
+      },
+      "fund_net_amount": 0.0,
+      "reasons": [
+        "3连板，市场辨识度高",
+        "龙头地位清晰(1.00)",
+        "板块资金扎堆(0.92)",
+        "动量强劲(1.00)",
+        "均线多头排列"
+      ],
+      "risks": [
+        "换手率极高，获利盘压力大"
+      ]
+    },
+    {
+      "stock_code": "600770",
+      "stock_name": "综艺股份",
+      "industry": "综合Ⅱ",
+      "concepts": [
+        "综合Ⅱ"
+      ],
+      "composite_score": 0.718,
+      "signal_level": "A",
+      "consecutive_zt": 1,
+      "buy_zone_low": 7.58,
+      "buy_zone_high": 8.43,
+      "buy_price": 7.7,
+      "stop_loss": 7.28,
+      "target_price": 8.09,
+      "factor_scores": {
+        "consecutive_board": 1.0,
+        "main_flow_intensity": 0.0,
+        "turnover_rank": 0.972,
+        "lhb_institution": 188670984.41,
+        "theme_lifecycle": 0.0,
+        "narrative_velocity": 0.0,
+        "theme_crowding": 0.917,
+        "leader_clarity": 1.0,
+        "momentum_score": 1.0,
+        "volume_ratio": 0.693
+      },
+      "technical": {
+        "stock_code": "600770",
+        "current_price": 7.66,
+        "ma5": 6.74,
+        "ma10": 6.23,
+        "ma20": 5.9,
+        "support_price": 6.74,
+        "resistance_price": 7.67,
+        "atr": 0.36,
+        "volume_ratio": 2.08,
+        "momentum_score": 1.0,
+        "buy_zone_low": 7.24,
+        "buy_zone_high": 7.34,
+        "trend": "上涨"
+      },
+      "fund_net_amount": 0.0,
+      "reasons": [
+        "龙头地位清晰(1.00)",
+        "板块资金扎堆(0.92)",
+        "龙虎榜机构买入1.9亿",
+        "动量强劲(1.00)",
+        "放量突破(量比2.1)",
+        "均线多头排列"
+      ],
+      "risks": [
+        "换手率极高，获利盘压力大"
+      ]
+    },
+    {
+      "stock_code": "001211",
+      "stock_name": "双枪科技",
+      "industry": "家居用品",
+      "concepts": [
+        "家居用品"
+      ],
+      "composite_score": 0.709,
+      "signal_level": "A",
+      "consecutive_zt": 0,
+      "buy_zone_low": 38.0,
+      "buy_zone_high": 36.25,
+      "buy_price": 37.48,
+      "stop_loss": 38.0,
+      "target_price": 40.55,
+      "factor_scores": {
+        "consecutive_board": 0.0,
+        "main_flow_intensity": 0.0,
+        "turnover_rank": 0.525,
+        "lhb_institution": 0.0,
+        "theme_lifecycle": 0.0,
+        "narrative_velocity": 0.0,
+        "theme_crowding": 0.917,
+        "leader_clarity": 1.0,
+        "momentum_score": 1.0,
+        "volume_ratio": 0.827
+      },
+      "technical": {
+        "stock_code": "001211",
+        "current_price": 40.0,
+        "ma5": 35.19,
+        "ma10": 33.39,
+        "ma20": 31.14,
+        "support_price": 35.19,
+        "resistance_price": 40.55,
+        "atr": 1.98,
+        "volume_ratio": 2.48,
+        "momentum_score": 1.0,
+        "buy_zone_low": 37.83,
+        "buy_zone_high": 38.31,
+        "trend": "上涨"
+      },
+      "fund_net_amount": 0.0,
+      "reasons": [
+        "龙头地位清晰(1.00)",
+        "板块资金扎堆(0.92)",
+        "动量强劲(1.00)",
+        "放量突破(量比2.5)",
+        "均线多头排列"
+      ],
+      "risks": []
+    },
+    {
+      "stock_code": "300604",
+      "stock_name": "长川科技",
+      "industry": "半导体",
+      "concepts": [
+        "半导体"
+      ],
+      "composite_score": 0.701,
+      "signal_level": "A",
+      "consecutive_zt": 0,
+      "buy_zone_low": 170.34,
+      "buy_zone_high": 168.97,
+      "buy_price": 169.93,
+      "stop_loss": 170.34,
+      "target_price": 188.0,
+      "factor_scores": {
+        "consecutive_board": 0.0,
+        "main_flow_intensity": 0.0,
+        "turnover_rank": 0.785,
+        "lhb_institution": 0.0,
+        "theme_lifecycle": 0.0,
+        "narrative_velocity": 0.0,
+        "theme_crowding": 0.917,
+        "leader_clarity": 1.0,
+        "momentum_score": 1.0,
+        "volume_ratio": 1.0
+      },
+      "technical": {
+        "stock_code": "300604",
+        "current_price": 179.31,
+        "ma5": 164.05,
+        "ma10": 156.63,
+        "ma20": 141.98,
+        "support_price": 164.05,
+        "resistance_price": 188.0,
+        "atr": 8.48,
+        "volume_ratio": 4.41,
+        "momentum_score": 1.0,
+        "buy_zone_low": 172.91,
+        "buy_zone_high": 175.06,
+        "trend": "上涨"
+      },
+      "fund_net_amount": 0.0,
+      "reasons": [
+        "龙头地位清晰(1.00)",
+        "板块资金扎堆(0.92)",
+        "动量强劲(1.00)",
+        "放量突破(量比4.4)",
+        "均线多头排列"
+      ],
+      "risks": []
+    }
+  ]
+}

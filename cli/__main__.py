@@ -43,6 +43,12 @@ if __name__ == "__main__":
     elif sub == "signal":
         from cli.signal import main
         main()
+    elif sub == "query":
+        from cli.query import main
+        main()
+    elif sub == "recommend":
+        from cli.recommend import main
+        main()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()
@@ -56,6 +62,8 @@ if __name__ == "__main__":
         print("  replay    复盘昨日剧本")
         print("  strategy  策略管理 (list/backtest/evolve/scan)")
         print("  signal    次日选股信号")
+        print("  recommend 每日个股推荐(含买入点位)")
+        print("  query     查询股票数据/市场概览")
     else:
         print(f"Unknown command: {sub}")
         sys.exit(1)

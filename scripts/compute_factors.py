@@ -32,6 +32,7 @@ def compute_and_save(date_str: str, db_path: str = "data/alpha_miner.db"):
     #   1. db.query() 中过滤 snapshot_time < as_of（需要 >= 当天采集时间）
     #   2. 因子内部 as_of.strftime() 取目标 trade_date（需要等于目标日期）
     # 所以用当天 23:59:59，既覆盖当天采集数据，又让 strftime 返回正确日期。
+    # 注意：回填数据需确保 snapshot_time <= trade_date 23:59:59
     from datetime import timedelta
     as_of = datetime.strptime(date_str, "%Y-%m-%d")
     query_as_of = as_of.replace(hour=23, minute=59, second=59)
@@ -59,7 +60,8 @@ def compute_and_save(date_str: str, db_path: str = "data/alpha_miner.db"):
     total_rows = 0
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
     for name in reg.list_factors():
         factor = reg.get_factor(name)
         try:

@@ -1,0 +1,39 @@
+# 每日个股推荐配置
+
+# 候选池来源（按优先级）
+candidate_sources:
+  - zt_pool          # 涨停池
+  - strong_pool      # 强势股池
+  - fund_flow        # 资金流入排行
+
+# 因子综合得分权重
+factor_weights:
+  theme_crowding: 0.25      # 板块拥挤度（IC=0.12, 强因子）
+  leader_clarity: 0.25      # 龙头清晰度（IC=0.072, 稳定强因子）
+  lhb_institution: 0.15     # 龙虎榜机构（IC=0.037）
+  turnover_rank: 0.10       # 换手排名（反向因子）
+  consecutive_board: 0.05   # 连板因子
+  momentum_score: 0.10      # 动量得分（技术面）
+  volume_ratio: 0.10        # 量比得分（技术面）
+
+# 技术分析参数
+technical:
+  ma_periods: [5, 10, 20]     # 均线周期
+  support_lookback: 20         # 支撑位回看天数
+  resistance_lookback: 20      # 压力位回看天数
+  volume_ratio_days: 5         # 量比计算天数
+  atr_period: 14               # ATR 周期
+  buy_zone_pct: 0.02           # 买入区间宽度（±2%）
+
+# 筛选过滤条件
+filters:
+  min_amount: 50000000       # 最低成交额 5000万
+  min_circulation_mv: 2000000000  # 最低流通市值 2亿
+  max_circulation_mv: 100000000000  # 最高流通市值 100亿
+  max_open_count: 2           # 最大炸板次数
+  min_composite_score: 0.35   # 最低综合得分
+
+# 输出设置
+output:
+  top_n: 5                     # 推荐只数
+  default_top_n: 5
