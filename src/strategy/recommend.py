@@ -332,14 +332,16 @@ class RecommendEngine:
                     rec.composite_score = min(rec.composite_score + 0.03, 1.0)
                 rec.reasons.append(f"历史胜率{bt.win_rate:.0f}%({bt.total_trades}次)")
 
-        # 13. LLM 深度推理（对前15名候选做LLM分析）
+        # 13. LLM 深度推理（仅对最终入选的5只做分析）
         if self.config.get("enable_llm_analysis", False):
             try:
                 from src.strategy.llm_analysis import batch_analyze
-                top_for_llm = sorted(recommendations, key=lambda r: r.composite_score, reverse=True)[:15]
+                # 先排序截取，再分析，避免浪费 API 调用
+                recommendations.sort(key=lambda r: r.composite_score, reverse=True)
+                top_for_llm = recommendations[:top_n]
                 llm_codes = [r.stock_code for r in top_for_llm]
                 llm_results = batch_analyze(llm_codes, report_date, db_path=self.db.db_path)
-                for rec in recommendations:
+                for rec in top_for_llm:
                     analysis = llm_results.get(rec.stock_code)
                     if analysis:
                         rec.composite_score = max(0, min(1, rec.composite_score + analysis.score_adjustment))
@@ -364,6 +366,9 @@ class RecommendEngine:
         hot_industries = self._hot_industries(report_date)
         hot_concepts = self._hot_concepts(report_date, candidates)
 
+        # ── 数据校验：确保推荐价格与当日收盘价一致 ──
+        self._validate_prices(filtered, report_date)
+
         return DailyRecommendation(
             trade_date=report_date,
             stocks=filtered,
@@ -373,6 +378,97 @@ class RecommendEngine:
             hot_industries=hot_industries,
             hot_concepts=hot_concepts,
         )
+
+    def _validate_prices(
+        self, recs: list[StockRecommendation], report_date: str,
+    ) -> None:
+        """校验推荐数据：确保每只股的 current_price 等于当日收盘价。
+        
+        如果不一致，用当日收盘价强制修正，并记录警告。
+        这是防止用旧数据生成推荐的关键校验。
+        """
+        if not recs:
+            return
+
+        conn = sqlite3.connect(self.db.db_path)
+        codes = [r.stock_code for r in recs]
+        placeholders = ",".join(["?"] * len(codes))
+        rows = conn.execute(
+            f"SELECT stock_code, close FROM daily_price "
+            f"WHERE trade_date = ? AND stock_code IN ({placeholders})",
+            [report_date] + codes,
+        ).fetchall()
+        conn.close()
+
+        db_close = {code: close for code, close in rows}
+
+        for rec in recs:
+            expected_close = db_close.get(rec.stock_code)
+            if expected_close is None:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"⚠ {rec.stock_code} 在 {report_date} 无K线数据，跳过校验"
+                )
+                continue
+
+            actual_price = rec.technical.current_price if rec.technical else 0
+            # 允许 0.01 的浮点误差
+            if abs(actual_price - expected_close) > 0.01:
+                import logging
+                logging.getLogger(__name__).error(
+                    f"❌ {rec.stock_code} {rec.stock_name} 价格不一致! "
+                    f"technical.current_price={actual_price}, "
+                    f"当日收盘价={expected_close} — 数据可能过旧"
+                )
+                # 强制用正确价格重算买入点位
+                if rec.technical:
+                    rec.technical.current_price = expected_close
+                    # 重算买入/止损/目标
+                    self._recompute_price_from_close(rec, expected_close)
+
+    def _recompute_price_from_close(
+        self, rec: StockRecommendation, close: float,
+    ) -> None:
+        """用正确的收盘价重新计算买入点位。"""
+        ta = rec.technical
+        if ta is None or close <= 0:
+            return
+
+        support = ta.support_price
+        resistance = ta.resistance_price
+        atr = ta.atr
+        is_zt = rec.consecutive_zt >= 1
+
+        if is_zt:
+            rec.buy_zone_low = round(close * 0.97, 2)
+            rec.buy_zone_high = round(close * 1.03, 2)
+            rec.buy_price = round(
+                rec.buy_zone_low + (rec.buy_zone_high - rec.buy_zone_low) * 0.4, 2
+            )
+            if rec.consecutive_zt >= 3:
+                rec.buy_zone_high = round(close * 1.01, 2)
+                rec.buy_price = round(close * 0.99, 2)
+        else:
+            rec.buy_zone_low = round(max(support * 0.98, close * 0.95), 2)
+            rec.buy_zone_high = round(min(close * 1.01, support * 1.03), 2)
+            if rec.buy_zone_low > rec.buy_zone_high:
+                rec.buy_zone_low = round(close * 0.97, 2)
+                rec.buy_zone_high = round(close * 1.00, 2)
+            rec.buy_price = round(
+                rec.buy_zone_low + (rec.buy_zone_high - rec.buy_zone_low) * 0.3, 2
+            )
+
+        stop_by_pct = close * 0.95
+        stop_by_atr = support - atr if atr > 0 else close * 0.93
+        rec.stop_loss = round(max(stop_by_pct, stop_by_atr, close * 0.90), 2)
+        if rec.stop_loss >= rec.buy_price:
+            rec.stop_loss = round(rec.buy_price * 0.95, 2)
+
+        target_by_resist = resistance if resistance > close else close * 1.08
+        target_by_atr = close + atr * 1.5 if atr > 0 else close * 1.05
+        rec.target_price = round(min(target_by_resist, target_by_atr, close * 1.15), 2)
+        if rec.target_price <= rec.buy_price * 1.03:
+            rec.target_price = round(rec.buy_price * 1.05, 2)
 
     def _build_candidates(
         self, as_of: datetime, report_date: str,

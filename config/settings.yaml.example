@@ -1,0 +1,33 @@
+# Alpha Miner 配置示例
+# 复制为 settings.yaml 并填入你的 API Key
+# cp config/settings.yaml.example config/settings.yaml
+
+database:
+  path: "data/alpha_miner.db"
+
+api:
+  deepseek:
+    api_key: ""  # 填入你的 DeepSeek API Key
+    base_url: "https://api.deepseek.com/"
+    model: "deepseek-v4-flash"
+
+collector:
+  retry_count: 3
+  retry_delay: 2
+  request_timeout: 30
+
+acceptance:
+  min_ic: 0.03
+  min_icir: 0.5
+  min_win_rate: 0.55
+  min_pnl_ratio: 1.2
+
+evolution:
+  default_generations: 10
+  default_population: 10
+  sandbox_timeout: 60
+  max_correlation: 0.7
+
+ic_tracker:
+  default_window: 20
+  forward_days: 1

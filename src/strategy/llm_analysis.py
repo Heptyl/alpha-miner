@@ -84,7 +84,7 @@ def _gather_context(
 
     # 2. 最近5天K线
     rows = conn.execute(
-        """SELECT trade_date, open, close, high, low, pct_change
+        """SELECT trade_date, open, close, high, low, pre_close
            FROM daily_price
            WHERE stock_code=? AND trade_date<=?
            ORDER BY trade_date DESC LIMIT 5""",
@@ -93,7 +93,9 @@ def _gather_context(
     if rows:
         klines = []
         for r in reversed(rows):
-            klines.append(f"  {r[0]}: 开{r[1]:.2f} 高{r[3]:.2f} 低{r[4]:.2f} 收{r[2]:.2f} 涨跌{r[5]:.2f}%")
+            pre_close = r[5] if r[5] and r[5] > 0 else r[2]
+            chg_pct = (r[2] / pre_close - 1) * 100
+            klines.append(f"  {r[0]}: 开{r[1]:.2f} 高{r[3]:.2f} 低{r[4]:.2f} 收{r[2]:.2f} 涨跌{chg_pct:.2f}%")
         ctx["recent_klines"] = "\n".join(klines)
 
         # 计算短期涨幅
@@ -113,21 +115,24 @@ def _gather_context(
         ctx["lhb_net"] = row[2]
         ctx["lhb_reason"] = row[3]
 
-    # 4. 基本面
-    row = conn.execute(
-        """SELECT pe_ttm, pb, roe, profit_yoy, is_st, total_mv
-           FROM stock_fundamentals
-           WHERE stock_code=?
-           ORDER BY trade_date DESC LIMIT 1""",
-        (stock_code,),
-    ).fetchone()
-    if row:
-        ctx["pe"] = row[0]
-        ctx["pb"] = row[1]
-        ctx["roe"] = row[2]
-        ctx["profit_yoy"] = row[3]
-        ctx["is_st"] = row[4]
-        ctx["total_mv"] = row[5]
+    # 4. 基本面（表可能不存在，容错）
+    try:
+        row = conn.execute(
+            """SELECT pe_ttm, pb, roe, profit_yoy, is_st, total_mv
+               FROM stock_fundamentals
+               WHERE stock_code=?
+               ORDER BY trade_date DESC LIMIT 1""",
+            (stock_code,),
+        ).fetchone()
+        if row:
+            ctx["pe"] = row[0]
+            ctx["pb"] = row[1]
+            ctx["roe"] = row[2]
+            ctx["profit_yoy"] = row[3]
+            ctx["is_st"] = row[4]
+            ctx["total_mv"] = row[5]
+    except Exception:
+        pass  # 基本面表不存在时跳过
 
     # 5. 市场环境
     zt_cnt = conn.execute(
@@ -272,25 +277,125 @@ def analyze_with_llm(
 
 
 def _default_llm_call(prompt: str) -> Optional[str]:
-    """默认LLM调用（使用项目配置的anthropic SDK）。"""
-    try:
-        import anthropic
-        import os
+    """默认LLM调用 — 支持多种 API provider。
 
-        # 项目使用 Z.AI endpoint
-        client = anthropic.Anthropic(
-            api_key=os.environ.get("ZAI_API_KEY", ""),
-            base_url=os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
+    优先级：
+    1. ZAI_API_KEY 环境变量（智谱/GLM via Anthropic SDK）
+    2. OPENAI_API_KEY 环境变量（OpenAI 兼容接口）
+    3. 配置文件 config/settings.yaml 中的 api 配置
+    """
+    import os
+    import yaml
+    from pathlib import Path
+
+    # 尝试从配置文件加载
+    settings_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+    cfg_api = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            cfg_api = cfg.get("api", {})
+        except Exception:
+            pass
+
+    # 1. DeepSeek（OpenAI 兼容，推荐）
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "") or cfg_api.get("deepseek", {}).get("api_key", "")
+    if ds_key and ds_key not in ("YOUR_KEY_HERE", "YOUR_DEEPSEEK_KEY_HERE"):
+        import requests as req
+        base_url = os.environ.get(
+            "DEEPSEEK_BASE_URL",
+            cfg_api.get("deepseek", {}).get("base_url", "https://api.deepseek.com/"),
         )
-        message = client.messages.create(
-            model="glm-4-plus",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text
-    except Exception as e:
-        print(f"  LLM调用失败: {e}")
-        return None
+        model = cfg_api.get("deepseek", {}).get("model", "deepseek-v4-flash")
+        if not base_url.endswith("/"):
+            base_url += "/"
+        # 重试3次，网络不稳定时自动重连
+        for attempt in range(3):
+            try:
+                resp = req.post(
+                    f"{base_url}chat/completions",
+                    headers={"Authorization": f"Bearer {ds_key}", "Content-Type": "application/json"},
+                    json={"model": model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"].get("content", "")
+                # v4-flash 是推理模型，content 可能为空但有 reasoning_content
+                if not content:
+                    reasoning = data["choices"][0]["message"].get("reasoning_content", "")
+                    if reasoning:
+                        # 从推理内容中提取最后一段作为回复
+                        content = reasoning.split("\n")[-1].strip() if reasoning else ""
+                return content if content else None
+            except Exception as e:
+                if attempt < 2:
+                    import time; time.sleep(3)
+                else:
+                    print(f"  DeepSeek调用失败(重试3次): {e}")
+
+    # 2. 智谱 GLM（via Anthropic SDK 兼容）
+    zai_key = os.environ.get("ZAI_API_KEY", "") or cfg_api.get("zhipu", {}).get("api_key", "")
+    if zai_key and zai_key != "YOUR_KEY_HERE":
+        try:
+            import anthropic
+            base_url = os.environ.get(
+                "ZAI_BASE_URL",
+                cfg_api.get("zhipu", {}).get("base_url", "https://open.bigmodel.cn/api/paas/v4/"),
+            )
+            model = cfg_api.get("zhipu", {}).get("model", "glm-4-plus")
+            client = anthropic.Anthropic(api_key=zai_key, base_url=base_url)
+            message = client.messages.create(
+                model=model, max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return message.content[0].text
+        except Exception as e:
+            print(f"  Z.AI调用失败: {e}")
+
+    # 2. OpenAI 兼容接口
+    openai_key = os.environ.get("OPENAI_API_KEY", "") or cfg_api.get("openai", {}).get("api_key", "")
+    if openai_key and openai_key != "YOUR_KEY_HERE":
+        try:
+            import anthropic
+            base_url = os.environ.get(
+                "OPENAI_BASE_URL",
+                cfg_api.get("openai", {}).get("base_url", "https://api.openai.com/v1/"),
+            )
+            model = cfg_api.get("openai", {}).get("model", "gpt-4o-mini")
+            client = anthropic.Anthropic(api_key=openai_key, base_url=base_url)
+            message = client.messages.create(
+                model=model, max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return message.content[0].text
+        except Exception as e:
+            print(f"  OpenAI调用失败: {e}")
+
+    # 3. 通过 requests 直接调用（兜底）
+    # 支持任意 OpenAI 兼容接口
+    any_key = os.environ.get("LLM_API_KEY", "")
+    any_url = os.environ.get("LLM_BASE_URL", "")
+    if any_key and any_url:
+        try:
+            import requests
+            model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+            resp = requests.post(
+                f"{any_url}/chat/completions",
+                headers={"Authorization": f"Bearer {any_key}", "Content-Type": "application/json"},
+                json={"model": model, "max_tokens": 1000, "messages": [{"role": "user", "content": prompt}]},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"  LLM API调用失败: {e}")
+
+    print("  LLM未配置API Key，请在以下任一位置配置：")
+    print("    - 环境变量: ZAI_API_KEY 或 OPENAI_API_KEY")
+    print("    - 配置文件: config/settings.yaml -> api.zhipu.api_key")
+    return None
 
 
 def batch_analyze(

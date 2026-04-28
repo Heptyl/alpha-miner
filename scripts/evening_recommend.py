@@ -65,23 +65,47 @@ def main():
         print(f"  ⏭ 今天({today})是周末，跳过")
         return
 
-    # 查数据库最新交易日
-    latest_trade = get_latest_trade_date()
-    print(f"  数据库最新交易日: {latest_trade}")
-    print(f"  今日: {today}")
+    # ── 时间边界：只用已收盘日期的数据 ──
+    # 当前时间 < 15:00 说明今天还没收盘，用昨天
+    # 当前时间 >= 15:00 说明今天已收盘，可以用今天
+    if args.date:
+        # 手动指定日期，信任用户
+        max_date = args.date
+    else:
+        # 自动模式：根据当前时间判断
+        if now.hour < 15:
+            max_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            max_date = today
+    print(f"  当前时间: {now.strftime('%H:%M')}")
+    print(f"  最大可用日期（已收盘）: {max_date}")
 
-    # 如果今天还没数据，尝试采集
-    if latest_trade != today:
-        print(f"  ⚠ 今日({today})无数据，尝试采集...")
-        code, _ = run_cmd("uv run python -m cli collect --today", check=False)
-        # 重新检查
-        latest_trade = get_latest_trade_date()
+    # 查数据库最新交易日（但不超过 max_date）
+    import sqlite3 as _sq
+    _conn = _sq.connect("data/alpha_miner.db")
+    row = _conn.execute(
+        "SELECT MAX(trade_date) FROM daily_price WHERE trade_date <= ?",
+        (max_date,),
+    ).fetchone()
+    latest_trade = row[0] if row else None
+    _conn.close()
+    print(f"  数据库最新已收盘交易日: {latest_trade}")
 
     if latest_trade is None:
-        print("  ❌ 数据库无任何数据，无法推荐")
+        print("  ⚠ 无已收盘数据，尝试采集...")
+        code, _ = run_cmd("uv run python -m cli collect --today", check=False)
+        _conn = _sq.connect("data/alpha_miner.db")
+        row = _conn.execute(
+            "SELECT MAX(trade_date) FROM daily_price WHERE trade_date <= ?",
+            (max_date,),
+        ).fetchone()
+        latest_trade = row[0] if row else None
+        _conn.close()
+
+    if latest_trade is None:
+        print("  ❌ 数据库无任何已收盘数据，无法推荐")
         return
 
-    # 用数据库中实际的最新交易日
     trade_date = latest_trade
     print(f"  ✅ 使用交易日: {trade_date}")
 
@@ -119,6 +143,24 @@ def main():
 
     engine = RecommendEngine(db)
     report = engine.recommend(as_of, trade_date, top_n=5)
+
+    # ── 数据校验：二次确认每只推荐股的收盘价正确 ──
+    import sqlite3 as _sq
+    _conn = _sq.connect("data/alpha_miner.db")
+    for s in report.stocks:
+        row = _conn.execute(
+            "SELECT close FROM daily_price WHERE trade_date = ? AND stock_code = ?",
+            (trade_date, s.stock_code),
+        ).fetchone()
+        if row:
+            db_close = row[0]
+            actual = s.technical.current_price if s.technical else 0
+            status = "✅" if abs(actual - db_close) < 0.01 else "❌ 不一致!"
+            print(f"  {status} {s.stock_code} {s.stock_name}: "
+                  f"收盘={db_close} 推荐={actual:.2f}")
+        else:
+            print(f"  ⚠ {s.stock_code} 无当日K线")
+    _conn.close()
 
     print(f"  推荐数量: {len(report.stocks)}")
     for i, s in enumerate(report.stocks, 1):

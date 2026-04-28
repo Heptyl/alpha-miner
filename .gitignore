@@ -11,3 +11,6 @@ uv.lock
 reports/
 factors/
 .claude/
+recommendations/
+config/settings.yaml
+*.db

@@ -39,4 +39,4 @@ output:
   default_top_n: 5
 
 # LLM深度推理（调用大模型分析候选股）
-enable_llm_analysis: false     # 设为 true 启用（每次推荐消耗 ~15 次 LLM 调用）
+enable_llm_analysis: true      # 设为 true 启用（每次推荐消耗 ~15 次 LLM 调用）
