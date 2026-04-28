@@ -578,8 +578,16 @@ class RecommendEngine:
         )
 
     def _compute_score(self, rec: StockRecommendation) -> float:
-        """计算综合得分。"""
+        """计算综合得分。优先使用自适应权重。"""
+        # 尝试使用自适应权重（基于近期IC表现）
         weights = self.config.get("factor_weights", self.DEFAULT_WEIGHTS)
+        try:
+            from src.strategy.adaptive_weights import get_adaptive_weights
+            adaptive = get_adaptive_weights(self.db.db_path, weights)
+            if adaptive:
+                weights = adaptive
+        except Exception:
+            pass  # 自适应失败时用默认权重
 
         score = 0.0
         total_weight = 0.0
