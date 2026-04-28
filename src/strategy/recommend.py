@@ -332,10 +332,29 @@ class RecommendEngine:
                     rec.composite_score = min(rec.composite_score + 0.03, 1.0)
                 rec.reasons.append(f"历史胜率{bt.win_rate:.0f}%({bt.total_trades}次)")
 
-        # 13. 过滤
+        # 13. LLM 深度推理（对前15名候选做LLM分析）
+        if self.config.get("enable_llm_analysis", False):
+            try:
+                from src.strategy.llm_analysis import batch_analyze
+                top_for_llm = sorted(recommendations, key=lambda r: r.composite_score, reverse=True)[:15]
+                llm_codes = [r.stock_code for r in top_for_llm]
+                llm_results = batch_analyze(llm_codes, report_date, db_path=self.db.db_path)
+                for rec in recommendations:
+                    analysis = llm_results.get(rec.stock_code)
+                    if analysis:
+                        rec.composite_score = max(0, min(1, rec.composite_score + analysis.score_adjustment))
+                        if analysis.summary:
+                            rec.reasons.append(f"AI:{analysis.summary}")
+                        if analysis.key_risk:
+                            rec.risks.append(analysis.key_risk)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"LLM分析跳过: {e}")
+
+        # 14. 过滤
         filtered = self._apply_filters(recommendations)
 
-        # 14. 排序 & 截取
+        # 15. 排序 & 截取
         filtered.sort(key=lambda r: r.composite_score, reverse=True)
         filtered = filtered[:top_n]
 
