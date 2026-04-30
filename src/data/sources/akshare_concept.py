@@ -56,7 +56,7 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
     """
     # 检查缓存
     if db is not None and _cache_valid(db):
-        print(f"[concept] 缓存有效（{CACHE_TTL_DAYS}天内），跳过采集")
+        logger.info("[concept] 缓存有效（%d天内），跳过采集", CACHE_TTL_DAYS)
         return pd.DataFrame()
 
     all_mappings = []
@@ -69,22 +69,22 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
             if concepts_df is not None and not concepts_df.empty:
                 # 同花顺返回 name, code 列
                 ths_concepts = concepts_df[["name", "code"]].to_dict("records")
-                print(f"[concept] 同花顺概念列表: {len(ths_concepts)} 个概念")
+                logger.info("[concept] 同花顺概念列表: %d 个概念", len(ths_concepts))
                 break
             if attempt < retries - 1:
                 time.sleep(3)
         except Exception as e:
             if attempt < retries - 1:
-                print(f"[concept] 同花顺尝试 {attempt + 1}/{retries} 失败: {e}")
+                logger.warning("[concept] 同花顺尝试 %d/%d 失败: %s", attempt + 1, retries, e)
                 time.sleep(3)
             else:
-                print(f"[concept] 同花顺拉取失败，使用 fallback: {e}")
+                logger.warning("[concept] 同花顺拉取失败，使用 fallback: %s", e)
 
     # 2. 从 DB 的 zt_pool / strong_pool 提取行业映射
     db_mappings = _extract_industry_mappings(db)
     if db_mappings:
         all_mappings.extend(db_mappings)
-        print(f"[concept] 从 DB 行业字段提取 {len(db_mappings)} 条映射")
+        logger.info("[concept] 从 DB 行业字段提取 %d 条映射", len(db_mappings))
 
     # 3. 如果同花顺概念列表获取成功，补充概念名映射
     #    （注意：同花顺没有直接获取概念成分股的稳定接口，
@@ -119,7 +119,7 @@ def fetch(trade_date: str, retries: int = 3, db: Storage = None) -> pd.DataFrame
 
     # 去重
     df = pd.DataFrame(all_mappings).drop_duplicates(subset=["stock_code", "concept_name"])
-    print(f"[concept] 总计 {len(df)} 条映射（去重后）")
+    logger.info("[concept] 总计 %d 条映射（去重后）", len(df))
     return df
 
 
@@ -160,7 +160,7 @@ def _fallback(db: Storage, trade_date: str) -> pd.DataFrame:
     try:
         df = db.query("concept_mapping", datetime(2099, 1, 1))
         if not df.empty:
-            print(f"[concept] fallback: 使用缓存中的 {len(df)} 条映射")
+            logger.info("[concept] fallback: 使用缓存中的 %d 条映射", len(df))
         return df.drop(columns=["snapshot_time"], errors="ignore")
     except Exception:
         return pd.DataFrame()

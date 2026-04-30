@@ -1,6 +1,7 @@
 """新闻采集 — akshare stock_news_em + snownlp 情感分析。"""
 
 import hashlib
+import logging
 import time
 from datetime import datetime
 
@@ -9,6 +10,8 @@ import pandas as pd
 from snownlp import SnowNLP
 
 from src.data.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 
 def _make_news_id(title: str, publish_time: str) -> str:
@@ -71,7 +74,7 @@ def fetch(stock_code: str = "", trade_date: str = "", retries: int = 3) -> pd.Da
             if attempt < retries - 1:
                 time.sleep(2)
             else:
-                print(f"[news] 拉取失败: {e}")
+                logger.warning("[news] 拉取失败: %s", e)
                 return pd.DataFrame()
 
     return pd.DataFrame()

@@ -175,31 +175,47 @@ class Storage:
         conn = self._get_conn()
         try:
             if dedup and "trade_date" in df.columns:
-                # 先确认表中有 trade_date 列
                 table_cols = {r[1] for r in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
                 if "trade_date" in table_cols:
-                    # factor_values: 按 (factor_name, trade_date) 去重
-                    if table == "factor_values" and "factor_name" in df.columns:
-                        for factor_name in df["factor_name"].unique():
-                            for td in df.loc[df["factor_name"] == factor_name, "trade_date"].unique():
-                                conn.execute(
-                                    f"DELETE FROM [{table}] WHERE factor_name = ? AND trade_date = ?",
-                                    (factor_name, td),
-                                )
-                    else:
-                        dates = df["trade_date"].unique()
-                        placeholders = ",".join(["?"] * len(dates))
-                        conn.execute(
-                            f"DELETE FROM [{table}] WHERE trade_date IN ({placeholders})",
-                            tuple(dates),
-                        )
-                    conn.commit()
+                    self._dedup_before_insert(table, df, conn)
 
             df.to_sql(table, conn, if_exists="append", index=False)
             conn.commit()
             return len(df)
         finally:
             conn.close()
+
+    def _dedup_before_insert(self, table: str, df: pd.DataFrame, conn: sqlite3.Connection) -> None:
+        """写入前按表特定键删除旧数据。"""
+        if table == "factor_values" and "factor_name" in df.columns:
+            for (fn, sc, td) in df[["factor_name", "stock_code", "trade_date"]].drop_duplicates().itertuples(index=False):
+                conn.execute(
+                    "DELETE FROM factor_values WHERE factor_name = ? AND stock_code = ? AND trade_date = ?",
+                    (fn, sc, td),
+                )
+        elif table == "ic_series" and "factor_name" in df.columns:
+            for (fn, td, fwd) in df[["factor_name", "trade_date", "forward_days"]].drop_duplicates().itertuples(index=False):
+                conn.execute(
+                    "DELETE FROM ic_series WHERE factor_name = ? AND trade_date = ? AND forward_days = ?",
+                    (fn, td, fwd),
+                )
+        elif table == "market_emotion":
+            for td in df["trade_date"].unique():
+                conn.execute("DELETE FROM market_emotion WHERE trade_date = ?", (td,))
+        elif table == "concept_daily" and "concept_name" in df.columns:
+            for (cn, td) in df[["concept_name", "trade_date"]].drop_duplicates().itertuples(index=False):
+                conn.execute(
+                    "DELETE FROM concept_daily WHERE concept_name = ? AND trade_date = ?",
+                    (cn, td),
+                )
+        else:
+            dates = df["trade_date"].unique()
+            placeholders = ",".join(["?"] * len(dates))
+            conn.execute(
+                f"DELETE FROM [{table}] WHERE trade_date IN ({placeholders})",
+                tuple(dates),
+            )
+        conn.commit()
 
     def execute(self, sql: str, params: tuple = ()) -> list[dict]:
         """执行原始 SQL 查询，返回字典列表。"""

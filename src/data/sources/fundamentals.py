@@ -19,11 +19,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 import requests
@@ -220,12 +223,12 @@ def fetch_fundamentals_batch(
 
         if (i + 1) % batch_size == 0:
             conn.commit()
-            print(f"  [{i+1}/{len(codes)}] 插入:{inserted} 错误:{errors}")
+            logger.info("[%d/%d] 插入:%d 错误:%d", i+1, len(codes), inserted, errors)
             time.sleep(delay)
 
     conn.commit()
     conn.close()
-    print(f"完成: 插入:{inserted} 错误:{errors}")
+    logger.info("完成: 插入:%d 错误:%d", inserted, errors)
     return results
 
 

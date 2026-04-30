@@ -8,6 +8,7 @@
 2. 或者 akshare 其他批量历史接口
 """
 
+import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -16,6 +17,8 @@ import pandas as pd
 import requests
 
 from src.data.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 PREFIX_MAP = {'6': 'sh', '0': 'sz', '3': 'sz', '4': 'bj', '8': 'bj'}
 
@@ -112,7 +115,7 @@ def backfill_via_tencent_hist(trade_date: str, codes: list[str] | None = None,
     if codes is None:
         codes = _get_all_codes_from_db()
     if not codes:
-        print("ERROR: 无可用股票代码")
+        logger.error("无可用股票代码")
         return pd.DataFrame()
 
     date_str = trade_date.replace("-", "")
@@ -157,15 +160,15 @@ def backfill_via_tencent_hist(trade_date: str, codes: list[str] | None = None,
             if result:
                 results.append(result)
             if done % 500 == 0:
-                print(f"  [{done}/{total}] {len(results)} OK, {fail_count} failed")
+                logger.info("[%d/%d] %d OK, %d failed", done, total, len(results), fail_count)
             with lock:
                 if fail_count > 50:
-                    print(f"  连续失败过多 ({fail_count})，终止")
+                    logger.warning("连续失败过多 (%d)，终止", fail_count)
                     for f in futures:
                         f.cancel()
                     break
 
-    print(f"  完成: {len(results)}/{total} OK, {fail_count} failed")
+    logger.info("完成: %d/%d OK, %d failed", len(results), total, fail_count)
     return pd.DataFrame(results) if results else pd.DataFrame()
 
 
@@ -193,10 +196,10 @@ def backfill_multi_days(start_date: str, end_date: str, skip_existing: bool = Tr
     # 获取代码列表
     codes = _get_all_codes_from_db()
     if not codes:
-        print("ERROR: 无股票代码，请先采集至少一天的全量数据")
+        logger.error("无股票代码，请先采集至少一天的全量数据")
         return {}
     
-    print(f"回填范围: {start_date} ~ {end_date}, {len(trade_dates)} 个工作日, {len(codes)} 只股票")
+    logger.info("回填范围: %s ~ %s, %d 个工作日, %d 只股票", start_date, end_date, len(trade_dates), len(codes))
     
     results = {}
     for i, date in enumerate(trade_dates, 1):
@@ -208,19 +211,19 @@ def backfill_multi_days(start_date: str, end_date: str, skip_existing: bool = Tr
             existing = cur.fetchone()[0]
             conn.close()
             if existing >= 4000:  # 已有足够数据
-                print(f"[{i}/{len(trade_dates)}] {date}: 已有 {existing} 行，跳过")
+                logger.info("[%d/%d] %s: 已有 %d 行，跳过", i, len(trade_dates), date, existing)
                 results[date] = existing
                 continue
         
-        print(f"[{i}/{len(trade_dates)}] {date}: 拉取中...")
+        logger.info("[%d/%d] %s: 拉取中...", i, len(trade_dates), date)
         df = backfill_via_tencent_hist(date, codes)
         if not df.empty:
             count = db.insert("daily_price", df, dedup=True)
             results[date] = count
-            print(f"  写入 {count} 行")
+            logger.info("写入 %d 行", count)
         else:
             results[date] = 0
-            print(f"  无数据")
+            logger.info("无数据")
         
         # 天间延迟
         if i < len(trade_dates):
@@ -232,10 +235,10 @@ def backfill_multi_days(start_date: str, end_date: str, skip_existing: bool = Tr
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("用法: python backfill_price.py START_DATE END_DATE")
-        print("例: python backfill_price.py 2026-04-01 2026-04-19")
+        logger.info("用法: python backfill_price.py START_DATE END_DATE")
+        logger.info("例: python backfill_price.py 2026-04-01 2026-04-19")
         sys.exit(1)
     
     results = backfill_multi_days(sys.argv[1], sys.argv[2])
     total = sum(results.values())
-    print(f"\n总计: {total} rows from {len(results)} dates")
+    logger.info("\n总计: %d rows from %d dates", total, len(results))

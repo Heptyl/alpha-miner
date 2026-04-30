@@ -3,6 +3,7 @@
 从已有 factor_values + daily_price 计算，不需要额外数据源。
 """
 
+import logging
 import sqlite3
 import warnings
 from datetime import datetime
@@ -15,6 +16,8 @@ from src.drift.ic_tracker import ICTracker
 from src.drift.cusum import detect_changepoints
 from src.drift.regime import RegimeDetector
 
+logger = logging.getLogger(__name__)
+
 
 def run_ic_pipeline(db: Storage, start_date: str | None = None,
                     end_date: str | None = None, forward_days: int = 1) -> dict:
@@ -24,7 +27,7 @@ def run_ic_pipeline(db: Storage, start_date: str | None = None,
         dict: {factor_name: {"dates": N, "valid_ic": M, "avg_ic": X}}
     """
     tracker = ICTracker(db)
-    
+
     # 获取有 factor_values 的日期范围
     conn = db._get_conn()
     try:
@@ -32,14 +35,23 @@ def run_ic_pipeline(db: Storage, start_date: str | None = None,
             start_date = conn.execute("SELECT MIN(trade_date) FROM factor_values").fetchone()[0]
         if not end_date:
             end_date = conn.execute("SELECT MAX(trade_date) FROM factor_values").fetchone()[0]
-        
+
         factors = [r[0] for r in conn.execute(
             "SELECT DISTINCT factor_name FROM factor_values ORDER BY factor_name"
         ).fetchall()]
+
+        # 跳过市场级因子（IC 计算需要个股截面数据，市场级因子无意义）
+        market_factors = {r[0] for r in conn.execute(
+            "SELECT DISTINCT fv.factor_name FROM factor_values fv "
+            "WHERE fv.stock_code = 'market'"
+        ).fetchall()}
+        if market_factors:
+            factors = [f for f in factors if f not in market_factors]
+            logger.info("跳过市场级因子: %s", ', '.join(sorted(market_factors)))
     finally:
         conn.close()
     
-    print(f"IC管线: {start_date} ~ {end_date}, {len(factors)} 个因子")
+    logger.info("IC管线: %s ~ %s, %d 个因子", start_date, end_date, len(factors))
     
     results = {}
     for fn in factors:
@@ -83,7 +95,7 @@ def run_drift_pipeline(db: Storage, threshold: float = 1.5) -> list[dict]:
             conn.close()
         
         if len(ic_data) < 10:
-            print(f"  {fn}: IC数据不足 ({len(ic_data)} 天), 跳过漂移检测")
+            logger.info("%s: IC数据不足 (%d 天), 跳过漂移检测", fn, len(ic_data))
             continue
         
         ic_series = ic_data.set_index("trade_date")["ic_value"]

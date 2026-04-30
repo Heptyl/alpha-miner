@@ -167,7 +167,7 @@ class ICTracker:
             return 0
 
         df = pd.DataFrame(rows)
-        return self.db.insert("ic_series", df)
+        return self.db.insert("ic_series", df, dedup=True)
 
     def current_status(self, factor_name: str, window: int = 20) -> dict:
         """返回因子当前 IC 状态摘要。"""

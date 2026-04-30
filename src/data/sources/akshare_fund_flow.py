@@ -111,7 +111,7 @@ def _fetch_ths_rank(trade_date: str) -> pd.DataFrame:
         total_pages = 110  # 默认估计
 
     logger.info("fund_flow ths: 共 %d 页", total_pages)
-    max_pages = min(total_pages, 25)  # 最多拉25页(1250只)，覆盖涨停+强势
+    max_pages = min(total_pages, 120)  # 全市场 ~5200 只（~110 页）
 
     # 解析第1页
     all_rows.extend(_parse_table(table, trade_date))
@@ -215,7 +215,7 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
         return result
 
     # 回退：东财逐只（可能被 WAF）
-    print("  [WARN] fund_flow: 同花顺失败，回退东财逐只")
+    logger.warning("fund_flow: 同花顺失败，回退东财逐只")
     return _fetch_em_fallback(trade_date)
 
 
@@ -232,7 +232,7 @@ def _fetch_em_fallback(trade_date: str) -> pd.DataFrame:
 
     for code in codes:
         if consecutive_fail >= 15:
-            print("  fund_flow 东财连续失败15只，终止")
+            logger.warning("fund_flow 东财连续失败15只，终止")
             break
         time.sleep(2)  # 更保守的限流
         try:

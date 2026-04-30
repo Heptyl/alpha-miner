@@ -19,6 +19,10 @@ echo "[2/7] 计算因子值..."
 uv run python -m cli.backtest --compute-today
 echo ""
 
+echo "[2.5/7] Regime 识别..."
+uv run python -c "from src.data.storage import Storage; from src.pipeline.runner import run_regime_pipeline; db=Storage(); db.init_db(); run_regime_pipeline(db)"
+echo ""
+
 echo "[3/7] 漂移检测..."
 uv run python -m cli.drift --date $DATE
 echo ""

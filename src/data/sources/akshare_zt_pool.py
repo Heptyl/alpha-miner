@@ -1,5 +1,6 @@
 """涨停池 + 炸板池 + 强势股 — akshare 三个接口合一个文件。"""
 
+import logging
 import time
 from datetime import datetime
 
@@ -7,6 +8,8 @@ import akshare as ak
 import pandas as pd
 
 from src.data.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_series(df: pd.DataFrame, col: str, default=0):
@@ -61,7 +64,7 @@ def fetch_zt_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
             if attempt < retries - 1:
                 time.sleep(2)
             else:
-                print(f"[zt_pool] 拉取失败: {e}")
+                logger.warning("[zt_pool] 拉取失败: %s", e)
                 return pd.DataFrame()
 
 
@@ -92,7 +95,7 @@ def fetch_zb_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
             if attempt < retries - 1:
                 time.sleep(2)
             else:
-                print(f"[zb_pool] 拉取失败: {e}")
+                logger.warning("[zb_pool] 拉取失败: %s", e)
                 return pd.DataFrame()
 
 
@@ -125,7 +128,7 @@ def fetch_strong_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
             if attempt < retries - 1:
                 time.sleep(2)
             else:
-                print(f"[strong_pool] 拉取失败: {e}")
+                logger.warning("[strong_pool] 拉取失败: %s", e)
                 return pd.DataFrame()
 
 

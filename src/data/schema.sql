@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS daily_price (
 
 CREATE INDEX IF NOT EXISTS idx_daily_price_date ON daily_price(trade_date);
 CREATE INDEX IF NOT EXISTS idx_daily_price_code ON daily_price(stock_code);
+CREATE INDEX IF NOT EXISTS idx_dp_date_code ON daily_price(trade_date, stock_code);
 
 CREATE TABLE IF NOT EXISTS zt_pool (
     stock_code      TEXT NOT NULL,
@@ -147,6 +148,8 @@ CREATE TABLE IF NOT EXISTS factor_values (
 
 CREATE INDEX IF NOT EXISTS idx_factor_values_name ON factor_values(factor_name);
 CREATE INDEX IF NOT EXISTS idx_factor_values_date ON factor_values(trade_date);
+CREATE INDEX IF NOT EXISTS idx_fv_name_date ON factor_values(factor_name, trade_date);
+CREATE INDEX IF NOT EXISTS idx_fv_name_date_code ON factor_values(factor_name, trade_date, stock_code);
 
 CREATE TABLE IF NOT EXISTS ic_series (
     factor_name    TEXT NOT NULL,
@@ -158,6 +161,7 @@ CREATE TABLE IF NOT EXISTS ic_series (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ic_series_name ON ic_series(factor_name);
+CREATE INDEX IF NOT EXISTS idx_ic_name_fwd ON ic_series(factor_name, forward_days);
 
 CREATE TABLE IF NOT EXISTS drift_events (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

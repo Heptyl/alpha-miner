@@ -52,37 +52,37 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
         df = akshare_zt_pool.fetch_zt_pool(trade_date)
         count = akshare_zt_pool.save_zt_pool(df, db)
         results["zt_pool"] = count
-        print(f"  [OK] zt_pool: {count} rows")
+        logger.info("zt_pool: %d rows", count)
     except Exception as e:
         results["zt_pool"] = 0
-        print(f"  [FAIL] zt_pool: {e}")
+        logger.warning("zt_pool: %s", e)
 
     try:
         df = akshare_zt_pool.fetch_zb_pool(trade_date)
         count = akshare_zt_pool.save_zb_pool(df, db)
         results["zb_pool"] = count
-        print(f"  [OK] zb_pool: {count} rows")
+        logger.info("zb_pool: %d rows", count)
     except Exception as e:
         results["zb_pool"] = 0
-        print(f"  [FAIL] zb_pool: {e}")
+        logger.warning("zb_pool: %s", e)
 
     try:
         df = akshare_zt_pool.fetch_strong_pool(trade_date)
         count = akshare_zt_pool.save_strong_pool(df, db)
         results["strong_pool"] = count
-        print(f"  [OK] strong_pool: {count} rows")
+        logger.info("strong_pool: %d rows", count)
     except Exception as e:
         results["strong_pool"] = 0
-        print(f"  [FAIL] strong_pool: {e}")
+        logger.warning("strong_pool: %s", e)
 
     try:
         df = akshare_lhb.fetch(trade_date)
         count = akshare_lhb.save(df, db)
         results["lhb_detail"] = count
-        print(f"  [OK] lhb_detail: {count} rows")
+        logger.info("lhb_detail: %d rows", count)
     except Exception as e:
         results["lhb_detail"] = 0
-        print(f"  [FAIL] lhb_detail: {e}")
+        logger.warning("lhb_detail: %s", e)
 
     # 1. 日K线 — today 模式只拉重点股票(涨停+强势+龙虎榜), backfill 模式全量
     try:
@@ -92,20 +92,20 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
             df = akshare_price.fetch_today(trade_date)
         count = akshare_price.save(df, db, dedup=True)
         results["daily_price"] = count
-        print(f"  [OK] daily_price: {count} rows")
+        logger.info("daily_price: %d rows", count)
     except Exception as e:
         results["daily_price"] = 0
-        print(f"  [FAIL] daily_price: {e}")
+        logger.warning("daily_price: %s", e)
 
     # 6. 资金流向
     try:
         df = akshare_fund_flow.fetch(trade_date)
         count = akshare_fund_flow.save(df, db, dedup=True)
         results["fund_flow"] = count
-        print(f"  [OK] fund_flow: {count} rows")
+        logger.info("fund_flow: %d rows", count)
     except Exception as e:
         results["fund_flow"] = 0
-        print(f"  [FAIL] fund_flow: {e}")
+        logger.warning("fund_flow: %s", e)
 
     # 6b. 个股新闻 — 拉涨停+强势股的新闻（限流 0.5s/只）
     try:
@@ -126,16 +126,16 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
                 combined = combined.drop_duplicates(subset=["news_id"], keep="first")
                 count = akshare_news.save(combined, db)
                 results["news"] = count
-                print(f"  [OK] news: {count} rows ({len(news_codes)} stocks)")
+                logger.info("news: %d rows (%d stocks)", count, len(news_codes))
             else:
                 results["news"] = 0
-                print(f"  [SKIP] news: 无当日新闻")
+                logger.info("news: 无当日新闻")
         else:
             results["news"] = 0
-            print(f"  [SKIP] news: 无重点股票代码")
+            logger.info("news: 无重点股票代码")
     except Exception as e:
         results["news"] = 0
-        print(f"  [FAIL] news: {e}")
+        logger.warning("news: %s", e)
 
     # 7. 概念映射（不稳定，频率低，可以不是每天都更新）
     try:
@@ -143,34 +143,34 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
         if not df.empty:
             count = akshare_concept.save(df, db)
             results["concept_mapping"] = count
-            print(f"  [OK] concept_mapping: {count} rows")
+            logger.info("concept_mapping: %d rows", count)
         else:
             results["concept_mapping"] = 0
-            print(f"  [SKIP] concept_mapping: empty")
+            logger.info("concept_mapping: empty")
     except Exception as e:
         results["concept_mapping"] = 0
-        print(f"  [FAIL] concept_mapping: {e}")
+        logger.warning("concept_mapping: %s", e)
 
     # ── 聚合：market_emotion ──
     try:
         _aggregate_market_emotion(trade_date, db)
         results["market_emotion"] = 1
-        print(f"  [OK] market_emotion: aggregated")
+        logger.info("market_emotion: aggregated")
     except Exception as e:
         results["market_emotion"] = 0
-        print(f"  [FAIL] market_emotion: {e}")
+        logger.warning("market_emotion: %s", e)
 
     # ── 聚合：concept_daily ──
     try:
         _aggregate_concept_daily(trade_date, db)
         results["concept_daily"] = 1
-        print(f"  [OK] concept_daily: aggregated")
+        logger.info("concept_daily: aggregated")
     except Exception as e:
         results["concept_daily"] = 0
-        print(f"  [FAIL] concept_daily: {e}")
+        logger.warning("concept_daily: %s", e)
 
     total = sum(results.values())
-    print(f"  Total: {total} from {len(results)} sources")
+    logger.info("Total: %d from %d sources", total, len(results))
     return results
 
 
@@ -228,7 +228,7 @@ def _aggregate_market_emotion(trade_date: str, db: Storage) -> None:
         "activity": activity,
         "sentiment_level": sentiment_level,
     }])
-    db.insert("market_emotion", emotion_df)
+    db.insert("market_emotion", emotion_df, dedup=True)
 
 
 def _get_news_codes(trade_date: str, db: Storage) -> list[str]:
@@ -311,4 +311,4 @@ def _aggregate_concept_daily(trade_date: str, db: Storage) -> None:
         "concept_name", "trade_date", "zt_count",
         "leader_code", "leader_consecutive",
     ]]
-    db.insert("concept_daily", result)
+    db.insert("concept_daily", result, dedup=True)

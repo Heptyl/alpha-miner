@@ -1,5 +1,6 @@
 """龙虎榜数据采集 — akshare stock_lhb_detail_em。"""
 
+import logging
 import time
 from datetime import datetime
 
@@ -7,6 +8,8 @@ import akshare as ak
 import pandas as pd
 
 from src.data.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 
 def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
@@ -67,12 +70,12 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
             err_str = str(e)
             # akshare 内部 bug: data_json["result"] 为 None（东财返回空）
             if "NoneType" in err_str:
-                print(f"[lhb] 东财返回空数据（可能无龙虎榜或非交易日）")
+                logger.info("[lhb] 东财返回空数据（可能无龙虎榜或非交易日）")
                 return pd.DataFrame()
             if attempt < retries - 1:
                 time.sleep(2)
             else:
-                print(f"[lhb] 拉取失败: {e}")
+                logger.warning("[lhb] 拉取失败: %s", e)
                 return pd.DataFrame()
 
 
