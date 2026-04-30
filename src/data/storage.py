@@ -178,12 +178,21 @@ class Storage:
                 # 先确认表中有 trade_date 列
                 table_cols = {r[1] for r in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
                 if "trade_date" in table_cols:
-                    dates = df["trade_date"].unique()
-                    placeholders = ",".join(["?"] * len(dates))
-                    conn.execute(
-                        f"DELETE FROM [{table}] WHERE trade_date IN ({placeholders})",
-                        tuple(dates),
-                    )
+                    # factor_values: 按 (factor_name, trade_date) 去重
+                    if table == "factor_values" and "factor_name" in df.columns:
+                        for factor_name in df["factor_name"].unique():
+                            for td in df.loc[df["factor_name"] == factor_name, "trade_date"].unique():
+                                conn.execute(
+                                    f"DELETE FROM [{table}] WHERE factor_name = ? AND trade_date = ?",
+                                    (factor_name, td),
+                                )
+                    else:
+                        dates = df["trade_date"].unique()
+                        placeholders = ",".join(["?"] * len(dates))
+                        conn.execute(
+                            f"DELETE FROM [{table}] WHERE trade_date IN ({placeholders})",
+                            tuple(dates),
+                        )
                     conn.commit()
 
             df.to_sql(table, conn, if_exists="append", index=False)

@@ -18,7 +18,7 @@ from src.drift.ic_tracker import ICTracker
 
 
 def get_universe(db: Storage, as_of: datetime, bypass_snapshot: bool = False) -> list[str]:
-    """获取 as_of 日的股票 universe。"""
+    """获取 as_of 日的股票 universe（全市场）。"""
     date_str = as_of.strftime("%Y-%m-%d")
     df = db.query("daily_price", as_of, where="trade_date = ?", params=(date_str,), bypass_snapshot=bypass_snapshot)
     if df.empty:
@@ -26,8 +26,38 @@ def get_universe(db: Storage, as_of: datetime, bypass_snapshot: bool = False) ->
     return sorted(df["stock_code"].unique().tolist())
 
 
+def get_focused_universe(db: Storage, as_of: datetime) -> list[str]:
+    """从 zt_pool + strong_pool + lhb_detail 获取聚焦 universe。
+
+    相比全市场 5000+ 只，聚焦池仅包含当日有异动的股票（涨停/强势/龙虎榜），
+    数量通常在几十到几百只，大幅减少重复计算和存储。
+    如果聚焦池为空（如非交易日或无异动），回退到全市场 universe。
+    """
+    date_str = as_of.strftime("%Y-%m-%d")
+    codes: set[str] = set()
+
+    for table in ("zt_pool", "strong_pool", "lhb_detail"):
+        try:
+            df = db.query(table, as_of, where="trade_date = ?", params=(date_str,))
+            if not df.empty and "stock_code" in df.columns:
+                codes.update(df["stock_code"].unique().tolist())
+        except Exception:
+            # 表不存在或查询失败，跳过
+            pass
+
+    if codes:
+        return sorted(codes)
+
+    # 回退：全市场
+    return get_universe(db, as_of)
+
+
 def compute_today(db_path: str = "data/alpha_miner.db"):
-    """计算今日所有因子值并写入 factor_values 表。"""
+    """计算今日所有因子值并写入 factor_values 表。
+
+    使用 focused universe（zt_pool + strong_pool + lhb_detail）缩小范围，
+    写入时 dedup=True 避免重复数据堆积。
+    """
     from src.data.storage import Storage
 
     db = Storage(db_path)
@@ -35,13 +65,14 @@ def compute_today(db_path: str = "data/alpha_miner.db"):
     date_str = as_of.strftime("%Y-%m-%d")
     snap_time = as_of
 
-    universe = get_universe(db, as_of)
+    # 优先使用聚焦 universe（涨停池 + 强势股 + 龙虎榜），大幅减少计算量
+    universe = get_focused_universe(db, as_of)
     if not universe:
-        print(f"[WARN] {date_str} 无行情数据，尝试最近一个交易日")
+        print(f"[WARN] {date_str} 无聚焦数据，尝试最近一个交易日")
         # 尝试往前找
         for i in range(1, 10):
             prev = as_of - timedelta(days=i)
-            universe = get_universe(db, prev)
+            universe = get_focused_universe(db, prev)
             if universe:
                 date_str = prev.strftime("%Y-%m-%d")
                 as_of = prev
@@ -76,7 +107,7 @@ def compute_today(db_path: str = "data/alpha_miner.db"):
 
             if rows:
                 df = pd.DataFrame(rows)
-                db.insert("factor_values", df, snapshot_time=snap_time)
+                db.insert("factor_values", df, snapshot_time=snap_time, dedup=True)
                 total_rows += len(rows)
                 print(f"  {name}: {len(rows)} 条")
 
@@ -273,7 +304,7 @@ def compute_all(db_path: str = "data/alpha_miner.db"):
 
             if rows:
                 df = pd.DataFrame(rows)
-                db.insert("factor_values", df, snapshot_time=snap_time)
+                db.insert("factor_values", df, snapshot_time=snap_time, dedup=True)
                 day_rows += len(rows)
 
         total_rows += day_rows

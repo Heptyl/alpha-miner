@@ -5,7 +5,6 @@
   uv run python scripts/compute_factors.py --all   # 所有交易日
 """
 import argparse
-import sqlite3
 from datetime import datetime
 
 import pandas as pd
@@ -13,14 +12,10 @@ from src.data.storage import Storage
 from src.factors.registry import FactorRegistry
 
 
-def get_trade_dates(db_path: str) -> list[str]:
+def get_trade_dates(db: Storage) -> list[str]:
     """从 zt_pool 获取所有交易日。"""
-    conn = sqlite3.connect(db_path)
-    dates = conn.execute(
-        "SELECT DISTINCT trade_date FROM zt_pool ORDER BY trade_date"
-    ).fetchall()
-    conn.close()
-    return [r[0] for r in dates]
+    rows = db.execute("SELECT DISTINCT trade_date FROM zt_pool ORDER BY trade_date")
+    return [r["trade_date"] for r in rows]
 
 
 def compute_and_save(date_str: str, db_path: str = "data/alpha_miner.db"):
@@ -46,19 +41,26 @@ def compute_and_save(date_str: str, db_path: str = "data/alpha_miner.db"):
     # 去重
     if "snapshot_time" in zt_df.columns:
         zt_df = zt_df.sort_values("snapshot_time").groupby("stock_code").last().reset_index()
-    universe = zt_df["stock_code"].unique().tolist()
+    universe = set(zt_df["stock_code"].unique().tolist())
 
     # 也加入强势股
     strong_df = db.query("strong_pool", query_as_of, where="trade_date = ?", params=(date_str,))
     if not strong_df.empty:
         if "snapshot_time" in strong_df.columns:
             strong_df = strong_df.sort_values("snapshot_time").groupby("stock_code").last().reset_index()
-        universe = list(set(universe + strong_df["stock_code"].unique().tolist()))
+        universe.update(strong_df["stock_code"].unique().tolist())
 
+    # 也加入龙虎榜个股
+    lhb_df = db.query("lhb_detail", query_as_of, where="trade_date = ?", params=(date_str,))
+    if not lhb_df.empty and "stock_code" in lhb_df.columns:
+        if "snapshot_time" in lhb_df.columns:
+            lhb_df = lhb_df.sort_values("snapshot_time").groupby("stock_code").last().reset_index()
+        universe.update(lhb_df["stock_code"].unique().tolist())
+
+    universe = list(universe)
     print(f"  {date_str}: universe={len(universe)} 只")
 
     total_rows = 0
-    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -74,29 +76,24 @@ def compute_and_save(date_str: str, db_path: str = "data/alpha_miner.db"):
             print(f"    {name}: 无数据")
             continue
 
-        # 写入 factor_values
-        rows = []
+        # 构建 DataFrame 写入 factor_values
+        records = []
         for code, val in values.items():
             if pd.isna(val):
                 continue
-            rows.append((date_str, code, name, float(val), snapshot_time))
+            records.append({
+                "trade_date": date_str,
+                "stock_code": code,
+                "factor_name": name,
+                "factor_value": float(val),
+            })
 
-        if rows:
-            # 去重：先删除当天同一因子的旧记录
-            conn.execute(
-                "DELETE FROM factor_values WHERE factor_name = ? AND trade_date = ?",
-                (name, date_str),
-            )
-            conn.executemany(
-                "INSERT INTO factor_values (trade_date, stock_code, factor_name, factor_value, snapshot_time) "
-                "VALUES (?, ?, ?, ?, ?)",
-                rows,
-            )
-            total_rows += len(rows)
-            print(f"    {name}: {len(rows)} 条")
+        if records:
+            factor_df = pd.DataFrame(records)
+            n = db.insert("factor_values", factor_df, dedup=True)
+            total_rows += n
+            print(f"    {name}: {n} 条")
 
-    conn.commit()
-    conn.close()
     return total_rows
 
 
@@ -112,7 +109,7 @@ def main():
     db.init_db()
 
     if args.all:
-        dates = get_trade_dates(db_path)
+        dates = get_trade_dates(db)
         print(f"共 {len(dates)} 个交易日")
         total = 0
         for d in dates:

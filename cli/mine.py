@@ -111,6 +111,11 @@ def cmd_evolve(args):
 def cmd_test_seeds(args):
     """只测试知识库种子，不进化。"""
     engine = EvolutionEngine(db_path=args.db, mining_log_path=args.log)
+
+    if getattr(args, "ignore_history", False):
+        # 设为不存在的路径，跳过历史过滤
+        engine.mining_log_path = Path("/tmp/.nonexistent_alpha_miner_log")
+
     candidates = engine._generate_from_knowledge()
 
     if not candidates:
@@ -380,7 +385,8 @@ def main():
     p_evolve.add_argument("--population", type=int, default=10, help="每代种群大小")
 
     # test-seeds
-    subparsers.add_parser("test-seeds", help="测试知识库种子假说")
+    p_test = subparsers.add_parser("test-seeds", help="测试知识库种子假说")
+    p_test.add_argument("--ignore-history", action="store_true", help="忽略历史失败记录，强制测试所有种子")
 
     # mutate
     p_mutate = subparsers.add_parser("mutate", help="对指定因子做变异探索")

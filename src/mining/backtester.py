@@ -9,7 +9,10 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import warnings
 from scipy import stats as scipy_stats
+
+warnings.filterwarnings("ignore", message="An input array is constant")
 
 from src.data.storage import Storage
 

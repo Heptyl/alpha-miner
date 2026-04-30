@@ -37,22 +37,22 @@ class DailyReport:
         lines.append("=" * 70)
 
         # ── 1. 市场概况 ──
-        lines.append(self._section_market(as_of))
+        lines.append(self._section_market(as_of, date_str))
 
         # ── 2. 有效因子排名 ──
-        lines.append(self._section_factors(as_of))
+        lines.append(self._section_factors(as_of, date_str))
 
         # ── 3. 漂移预警 ──
-        lines.append(self._section_drift(as_of))
+        lines.append(self._section_drift(as_of, date_str))
 
         # ── 4. 今日挖掘结果 ──
-        lines.append(self._section_mining(as_of))
+        lines.append(self._section_mining(as_of, date_str))
 
         # ── 5. 明日候选标的 ──
-        lines.append(self._section_candidates(as_of))
+        lines.append(self._section_candidates(as_of, date_str))
 
         # ── 6. 系统状态 ──
-        lines.append(self._section_system(as_of))
+        lines.append(self._section_system(as_of, date_str))
 
         lines.append("\n" + "=" * 70)
         return "\n".join(lines)
@@ -61,9 +61,8 @@ class DailyReport:
     # 各板块
     # ================================================================
 
-    def _section_market(self, as_of: datetime) -> str:
+    def _section_market(self, as_of: datetime, date_str: str) -> str:
         """市场概况。"""
-        date_str = as_of.strftime("%Y-%m-%d")
         lines = ["\n[1. 市场概况]"]
 
         # 市场情绪
@@ -99,7 +98,7 @@ class DailyReport:
 
         return "\n".join(lines)
 
-    def _section_factors(self, as_of: datetime) -> str:
+    def _section_factors(self, as_of: datetime, date_str: str) -> str:
         """有效因子排名。"""
         lines = ["\n[2. 有效因子排名]"]
 
@@ -142,7 +141,7 @@ class DailyReport:
 
         return "\n".join(lines)
 
-    def _section_drift(self, as_of: datetime) -> str:
+    def _section_drift(self, as_of: datetime, date_str: str) -> str:
         """漂移预警。"""
         lines = ["\n[3. 漂移预警]"]
 
@@ -169,7 +168,7 @@ class DailyReport:
 
         return "\n".join(lines)
 
-    def _section_mining(self, as_of: datetime) -> str:
+    def _section_mining(self, as_of: datetime, date_str: str) -> str:
         """今日挖掘结果。"""
         lines = ["\n[4. 今日挖掘结果]"]
 
@@ -177,7 +176,6 @@ class DailyReport:
             lines.append("  (无挖掘记录)")
             return "\n".join(lines)
 
-        date_str = as_of.strftime("%Y-%m-%d")
         records = []
         for line in self.mining_log_path.read_text().strip().split("\n"):
             try:
@@ -205,11 +203,10 @@ class DailyReport:
 
         return "\n".join(lines)
 
-    def _section_candidates(self, as_of: datetime) -> str:
+    def _section_candidates(self, as_of: datetime, date_str: str) -> str:
         """明日候选标的 — 有效因子加权打分，regime 调权。"""
         lines = ["\n[5. 明日候选标的]"]
 
-        date_str = as_of.strftime("%Y-%m-%d")
         factor_names = self.registry.list_factors()
 
         if not factor_names:
@@ -295,11 +292,9 @@ class DailyReport:
 
         return "\n".join(lines)
 
-    def _section_system(self, as_of: datetime) -> str:
+    def _section_system(self, as_of: datetime, date_str: str) -> str:
         """系统状态。"""
         lines = ["\n[6. 系统状态]"]
-
-        date_str = as_of.strftime("%Y-%m-%d")
 
         # 数据量统计
         tables = ["daily_price", "zt_pool", "zb_pool", "lhb_detail", "fund_flow",

@@ -61,12 +61,13 @@ class LhbInstitutionFactor(BaseFactor):
                             break
                 result[stock_code] = net
         else:
-            # 模式2：无席位信息 → 用整体净买入额（按股票聚合，去重求和）
+            # 模式2：无席位信息 → 用整体净买入额
+            # 注意：lhb_detail 每只股票可能有多条（不同上榜原因），但 net_amount 是该股总额
+            # 所以取每只股票第一条的 net_amount（已去重），不能 sum
             if "net_amount" in lhb_df.columns:
-                net_by_stock = (
-                    lhb_df.groupby("stock_code")["net_amount"]
-                    .sum()
-                )
+                # 按 stock_code 去重取第一条（避免重复 sum 导致金额膨胀）
+                lhb_unique = lhb_df.drop_duplicates(subset=["stock_code"], keep="first")
+                net_by_stock = lhb_unique.set_index("stock_code")["net_amount"]
                 for code in universe:
                     if code in net_by_stock.index:
                         result[code] = float(net_by_stock[code])

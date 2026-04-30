@@ -888,6 +888,7 @@ def compute(universe, as_of, db):
             compute 函数对象，或 None（提取失败时）
         """
         try:
+            import numpy as np  # noqa: ensure available in namespace
             import pandas as pd  # noqa: ensure available in namespace
             namespace = {"pd": pd, "np": np}
             exec(code, namespace)  # noqa: S102

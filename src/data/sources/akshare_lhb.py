@@ -57,8 +57,9 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
             # 汇总接口无营业部明细，留空
             result["buy_depart"] = ""
             result["sell_depart"] = ""
-            # 用序号区分同一股票多条记录，避免唯一约束冲突
-            result["_row_idx"] = range(len(result))
+
+            # 按 (stock_code, reason) 去重 — 同一股票可能因不同原因上榜，保留每条原因
+            result = result.drop_duplicates(subset=["stock_code", "reason"], keep="first").reset_index(drop=True)
 
             return result
 
@@ -79,4 +80,9 @@ def save(df: pd.DataFrame, db: Storage) -> int:
     """将龙虎榜数据写入数据库。"""
     if df.empty:
         return 0
+    # 写入前先删当天旧数据，避免重复累积
+    if "trade_date" in df.columns:
+        dates = df["trade_date"].unique()
+        for d in dates:
+            db.execute_write("DELETE FROM lhb_detail WHERE trade_date = ?", (d,))
     return db.insert("lhb_detail", df)
