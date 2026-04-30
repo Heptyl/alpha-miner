@@ -56,13 +56,34 @@ def push_recommendation(
     # 2. 推送到微信
     if target:
         try:
-            from hermes_tools import send_message as hermes_send
-            # 直接用 terminal 调 Hermes CLI 的方式更可靠
             import subprocess
             # 通过 hermes send_message 推送
-            # 这里用文件中转，避免导入问题
-            results["wechat"] = "queued"
-        except Exception:
+            # 将消息写入临时文件
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:
+                tmp.write(push_text)
+                tmp_path = tmp.name
+            # 用 Hermes gateway 的 weixin 发送
+            result = subprocess.run(
+                [
+                    '/home/ccy/.hermes/hermes-agent/venv/bin/python',
+                    str(Path(__file__).parent.parent.parent / 'scripts' / 'send_wechat.py'),
+                    tmp_path,
+                ],
+                capture_output=True, text=True, timeout=30,
+                env={
+                    **dict(__import__('os').environ),
+                    'WEIXIN_CHAT_ID': target,
+                },
+            )
+            Path(tmp_path).unlink(missing_ok=True)
+            if result.returncode == 0:
+                results["wechat"] = "ok"
+            else:
+                logger.warning("微信推送失败: %s", result.stderr[:200])
+                results["wechat"] = "error"
+        except Exception as e:
+            logger.warning("微信推送异常: %s", e)
             results["wechat"] = "error"
 
     # 3. 保存纯文本文件

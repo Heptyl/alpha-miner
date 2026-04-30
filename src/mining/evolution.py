@@ -806,7 +806,12 @@ def compute(universe, as_of, db):
                 db = Storage(self.db_path)
                 backtester = FactorBacktester(db)
                 bt_result = backtester.run(compute_fn, factor_name=candidate.name)
-                candidate.evaluation = bt_result.to_dict()
+                if bt_result.error:
+                    # backtester 数据不足（如测试环境），回退到沙箱 IC 结果
+                    logger.debug("FactorBacktester 数据不足(%s)，回退沙箱", bt_result.error)
+                    candidate.evaluation = result.get("ic_result", {})
+                else:
+                    candidate.evaluation = bt_result.to_dict()
             except Exception as e:
                 logger.warning("FactorBacktester 回测失败，回退到沙箱结果: %s", e)
                 candidate.evaluation = result.get("ic_result", {})
