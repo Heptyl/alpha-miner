@@ -5,6 +5,7 @@
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from src.data.storage import Storage
@@ -35,7 +36,7 @@ class ThemeLifecycleFactor(BaseFactor):
         concept_map_df = dedup_latest(concept_map_df, key_cols=("stock_code", "concept_name"))
 
         if concept_daily_df.empty or concept_map_df.empty:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
         # 计算每个概念的生命周期分数
         concept_scores = {}
@@ -66,6 +67,6 @@ class ThemeLifecycleFactor(BaseFactor):
                 scores = [concept_scores.get(c, 0.0) for c in concepts]
                 result[code] = max(scores)  # 取最强的概念分数
             else:
-                result[code] = 0.0
+                result[code] = np.nan
 
         return pd.Series(result, index=universe, name=self.name)

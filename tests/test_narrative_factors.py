@@ -1,6 +1,7 @@
 """叙事因子单元测试 — 用 mock 数据验证 compute 逻辑。"""
 
 from datetime import datetime, timedelta
+import math
 
 import pandas as pd
 import pytest
@@ -90,7 +91,7 @@ class TestNarrativeVelocity:
         # 000001: 今天2条, 3天前1条 → (2-1)/1 = 1.0
         assert result["000001"] > 0
         # 000002: 没有新闻 → 0
-        assert result["000002"] == 0.0
+        assert math.isnan(result["000002"])
 
 
 class TestNarrativeVelocityWeighted:

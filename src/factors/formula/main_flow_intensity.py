@@ -5,6 +5,7 @@
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from src.data.storage import Storage
@@ -55,8 +56,11 @@ class MainFlowIntensityFactor(BaseFactor):
         # 计算强度
         result = {}
         for code in universe:
-            net = main_net_map.get(code, 0.0)
-            amt = amount_map.get(code, 1.0)  # 避免 /0
-            result[code] = net / amt if amt > 0 else 0.0
+            if code not in main_net_map:
+                result[code] = np.nan
+            else:
+                net = main_net_map[code]
+                amt = amount_map.get(code, 1.0)  # 避免 /0
+                result[code] = net / amt if amt > 0 else 0.0
 
         return pd.Series(result, index=universe, name=self.name)

@@ -5,6 +5,7 @@
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from src.data.storage import Storage
@@ -33,15 +34,15 @@ class LeaderClarityFactor(BaseFactor):
         self.validate_no_future(as_of, zt_df)
 
         if zt_df.empty or concept_map_df.empty:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
         if "amount" not in zt_df.columns:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
         # 每个概念内按成交额排名
         zt_with_concept = zt_df.merge(concept_map_df, on="stock_code", how="left")
         if zt_with_concept.empty or "concept_name" not in zt_with_concept.columns:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
         concept_leader_clarity = {}
         for concept, group in zt_with_concept.groupby("concept_name"):
@@ -64,7 +65,7 @@ class LeaderClarityFactor(BaseFactor):
         for code in universe:
             concepts = stock_concepts.get(code, [])
             if not concepts:
-                result[code] = 0.0
+                result[code] = np.nan
                 continue
 
             # 取最强概念

@@ -6,6 +6,7 @@
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from src.data.storage import Storage
@@ -34,9 +35,9 @@ class LhbInstitutionFactor(BaseFactor):
         self.validate_no_future(as_of, lhb_df)
 
         if lhb_df.empty:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
-        result = {code: 0.0 for code in universe}
+        result = {code: np.nan for code in universe}
 
         # 检查是否有有效的席位信息
         has_depart_info = False

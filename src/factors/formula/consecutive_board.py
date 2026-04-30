@@ -5,6 +5,7 @@
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from src.data.storage import Storage
@@ -28,7 +29,7 @@ class ConsecutiveBoardFactor(BaseFactor):
         self.validate_no_future(as_of, zt_df)
 
         if zt_df.empty:
-            return pd.Series(0.0, index=universe, name=self.name)
+            return pd.Series(np.nan, index=universe, name=self.name)
 
         # 构建 stock_code -> consecutive_zt 映射
         board_map = {}
@@ -37,7 +38,7 @@ class ConsecutiveBoardFactor(BaseFactor):
                 board_map[row["stock_code"]] = float(row["consecutive_zt"])
 
         return pd.Series(
-            [float(board_map.get(code, 0)) for code in universe],
+            [float(board_map.get(code, np.nan)) for code in universe],
             index=universe,
             name=self.name,
         )

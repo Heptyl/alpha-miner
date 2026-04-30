@@ -6,6 +6,7 @@
 3. 精确断言（误差<0.01 或具体值）
 """
 from datetime import datetime
+import math
 
 import pandas as pd
 import numpy as np
@@ -192,8 +193,8 @@ class TestNarrativeVelocityHard:
         from src.factors.narrative.narrative_velocity import NarrativeVelocityFactor
         f = NarrativeVelocityFactor()
         result = f.compute(["000004"], datetime(2024, 6, 14, 15, 0, 0), populated_db)
-        assert result["000004"] == 0.0, \
-            f"000004 velocity={result['000004']}, 期望 0.0"
+        assert math.isnan(result["000004"]), \
+            f"000004 velocity={result['000004']}, 期望 NaN"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -295,7 +296,7 @@ class TestLeaderClarityNoConcept:
         from src.factors.narrative.leader_clarity import LeaderClarityFactor
         f = LeaderClarityFactor()
         result = f.compute(["000001"], datetime(2024, 6, 14, 15, 0, 0), db)
-        assert result["000001"] == 0.0
+        assert math.isnan(result["000001"])
 
 
 class TestLeaderClaritySingleMember:

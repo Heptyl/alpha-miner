@@ -1,6 +1,7 @@
 """公式因子单元测试 — 用 mock 数据验证 compute 逻辑。"""
 
 from datetime import datetime, timedelta
+import math
 
 import pandas as pd
 import pytest
@@ -93,12 +94,12 @@ class TestConsecutiveBoard:
         result = factor.compute(universe, datetime(2024, 6, 14, 15, 0, 0), db)
         assert result["000001"] == 3.0  # 3连板
         assert result["000002"] == 1.0  # 1连板
-        assert result["000003"] == 0.0  # 非涨停
+        assert math.isnan(result["000003"])  # 非涨停 → NaN
 
     def test_empty(self, db):
         factor = ConsecutiveBoardFactor()
         result = factor.compute(["999999"], datetime(2024, 6, 14, 15, 0, 0), db)
-        assert result["999999"] == 0.0
+        assert math.isnan(result["999999"])
 
 
 class TestMainFlowIntensity:
