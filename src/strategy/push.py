@@ -128,6 +128,8 @@ def _format_wechat_message(report: DailyRecommendation) -> str:
                 lines.append(f"   ⚠️ {' | '.join(stock.risks[:1])}")
             lines.append("")
 
+    lines.append("📋 纪律: 次日低开超1%放弃买入 | 严禁追高 | 严格止损")
+    lines.append("")
     lines.append("⚠ 以上仅供参考，不构成投资建议")
     return "\n".join(lines)
 

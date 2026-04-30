@@ -1,23 +1,36 @@
-"""检查当前数据覆盖情况。"""
+"""检查最新数据日期和复盘脚本逻辑"""
 import sqlite3
+conn = sqlite3.connect('data/alpha_miner.db')
+c = conn.cursor()
 
-conn = sqlite3.connect("data/alpha_miner.db")
+# Check max dates
+tables_cols = [
+    ('daily_price', 'trade_date'),
+    ('zt_pool', 'trade_date'),
+    ('strong_pool', 'trade_date'),
+    ('market_emotion', 'trade_date'),
+    ('market_scripts', 'trade_date'),
+    ('replay_log', 'trade_date'),
+    ('lhb_detail', 'trade_date'),
+    ('fund_flow', 'trade_date'),
+]
+for t, col in tables_cols:
+    c.execute(f'SELECT COUNT(*), MAX({col}) FROM {t}')
+    cnt, maxd = c.fetchone()
+    print(f'{t}: count={cnt}, max_date={maxd}')
 
-for t in ["daily_price", "zt_pool", "zb_pool", "strong_pool", "fund_flow", "lhb_detail", "news", "concept_mapping", "factor_values", "ic_series", "drift_events", "regime_state"]:
-    try:
-        r = conn.execute(f"SELECT COUNT(*), COUNT(DISTINCT trade_date), MIN(trade_date), MAX(trade_date) FROM {t}").fetchone()
-        print(f"{t:20s}: {r[0]:>6} rows, {r[1]:>3} days, {r[2]} ~ {r[3]}")
-    except Exception:
-        r = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()
-        print(f"{t:20s}: {r[0]:>6} rows")
+# Check if there's data for 2026-04-29
+print("\n--- 2026-04-29 data ---")
+for t, col in tables_cols:
+    c.execute(f'SELECT COUNT(*) FROM {t} WHERE {col} = ?', ('2026-04-29',))
+    cnt = c.fetchone()[0]
+    print(f'{t}: count={cnt}')
 
-r = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM daily_price").fetchone()
-print(f"\ndaily_price: {r[0]} distinct stocks")
-
-# factor_values 详情
-r = conn.execute("SELECT factor_name, COUNT(*), COUNT(DISTINCT trade_date), MIN(trade_date), MAX(trade_date) FROM factor_values GROUP BY factor_name").fetchall()
-print("\nfactor_values breakdown:")
-for row in r:
-    print(f"  {row[0]:30s}: {row[1]:>6} rows, {row[2]:>3} days, {row[3]} ~ {row[4]}")
+# Check 2026-04-28
+print("\n--- 2026-04-28 data ---")
+for t, col in tables_cols:
+    c.execute(f'SELECT COUNT(*) FROM {t} WHERE {col} = ?', ('2026-04-28',))
+    cnt = c.fetchone()[0]
+    print(f'{t}: count={cnt}')
 
 conn.close()

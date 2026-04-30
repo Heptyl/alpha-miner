@@ -79,7 +79,7 @@ def fetch_tencent_hist(code, start_date, end_date):
                     "close": float(k[2]),
                     "high": float(k[3]),
                     "low": float(k[4]),
-                    "volume": float(k[5]),
+                    "volume": float(k[5]) / 100,  # 腾讯返回的是股，统一转成手
                     "pre_close": 0,
                     "amount": 0,
                     "turnover_rate": 0,

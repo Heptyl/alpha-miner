@@ -619,6 +619,12 @@ class RecommendEngine:
         if rec.fund_net_amount > 1e8:
             score += min(rec.fund_net_amount / 1e9 * 0.05, 0.10)
 
+        # 炸板扣分：open_count=1 减0.05，>=2 减0.10
+        if rec.open_count >= 2:
+            score -= 0.10
+        elif rec.open_count == 1:
+            score -= 0.05
+
         return min(score, 1.0)
 
     def _compute_price_levels(self, rec: StockRecommendation) -> None:
@@ -651,59 +657,60 @@ class RecommendEngine:
         if close <= 0:
             return
 
+        # ── 统一以收盘价为锚点计算买入区间 ──
+        # 核心原则：推荐的是次日操作，买入价不应偏离收盘价太多
         if is_zt:
-            # ── 涨停股的买入点位 ──
-            # 涨停次日通常高开，买入区间基于【预期次日价格】
-            # 次日参考价 ≈ 收盘价（涨停价），高开2%~5%常见
-            next_ref = close  # 次日开盘基准
-            
-            # 买入区间：高开后回落的低吸区间
-            rec.buy_zone_low = round(close * 0.97, 2)   # 回落3%可低吸
-            rec.buy_zone_high = round(close * 1.03, 2)   # 高开3%以内可追
-            
-            # 建议买价：区间中位偏下
+            # 涨停股：次日通常高开2%~5%
+            if rec.consecutive_zt >= 3:
+                # 高位连板，保守追高
+                rec.buy_zone_low = round(close * 0.99, 2)
+                rec.buy_zone_high = round(close * 1.02, 2)
+            else:
+                # 普通1~2连板
+                rec.buy_zone_low = round(close * 0.98, 2)   # 低开/回落2%可低吸
+                rec.buy_zone_high = round(close * 1.03, 2)  # 高开3%以内可追
             rec.buy_price = round(
                 rec.buy_zone_low + (rec.buy_zone_high - rec.buy_zone_low) * 0.4, 2
             )
-            
-            # 连板越多，次日高开概率越高但风险也越大
-            if rec.consecutive_zt >= 3:
-                # 高位连板，保守一点
-                rec.buy_zone_high = round(close * 1.01, 2)
-                rec.buy_price = round(close * 0.99, 2)
         else:
-            # ── 非涨停股的买入点位 ──
-            # 次日低吸策略
-            rec.buy_zone_low = round(max(support * 0.98, close * 0.95), 2)
-            rec.buy_zone_high = round(min(close * 1.01, support * 1.03), 2)
-            
-            # 确保下限 <= 上限
-            if rec.buy_zone_low > rec.buy_zone_high:
-                rec.buy_zone_low = round(close * 0.97, 2)
-                rec.buy_zone_high = round(close * 1.00, 2)
-            
-            # 建议买价
-            rec.buy_price = round(
-                rec.buy_zone_low + (rec.buy_zone_high - rec.buy_zone_low) * 0.3, 2
-            )
+            # 非涨停强势股：次日平开或小幅高/低开
+            if ta.momentum_score > 0.9:
+                # 强势股（动量>0.9）：追高买入区间上移至 +1%~+4%
+                rec.buy_zone_low = round(close * 1.01, 2)    # 高开1%
+                rec.buy_zone_high = round(close * 1.04, 2)   # 高开4%以内
+                rec.buy_price = round(close * 1.02, 2)       # 基准价+2%
+            else:
+                # 普通非涨停股：买入区间紧贴收盘价，-1%~+2%
+                rec.buy_zone_low = round(close * 0.99, 2)    # 回落1%
+                rec.buy_zone_high = round(close * 1.02, 2)   # 高开2%以内
+                rec.buy_price = round(close * 1.00, 2)       # 以收盘价为基准
 
-        # 止损价：当前价 -5% 或 支撑位下方1个ATR（取较大者=更保守）
-        stop_by_pct = close * 0.95
-        stop_by_atr = support - atr if atr > 0 else close * 0.93
-        rec.stop_loss = round(max(stop_by_pct, stop_by_atr, close * 0.90), 2)
-        
-        # 确保止损价 < 买入价
+        # 止损价：收盘价 -3%（强势股止损要紧）
+        # 如果支撑位高于-3%则用支撑位下方0.5%作为止损
+        stop_by_pct = round(close * 0.97, 2)
+        stop_by_support = round(support * 0.995, 2) if support > 0 else stop_by_pct
+        rec.stop_loss = max(stop_by_pct, stop_by_support)
+        # 止损不超过买入价的-3%
+        if rec.stop_loss >= rec.buy_price * 0.97:
+            rec.stop_loss = round(rec.buy_price * 0.97, 2)
+
+        # 目标价：收盘价 +3%~8%，参考压力位
+        target_min = round(close * 1.03, 2)   # 最低3%
+        target_max = round(close * 1.08, 2)   # 最高8%
+        if resistance > close:
+            # 有明确压力位，取压力位与+5%中较小的
+            rec.target_price = round(min(resistance * 0.99, close * 1.05), 2)
+        else:
+            rec.target_price = round(close * 1.05, 2)  # 默认+5%
+        # 确保在合理区间内
+        rec.target_price = max(rec.target_price, target_min)
+        rec.target_price = min(rec.target_price, target_max)
+
+        # 确保止损 < 买入 < 目标
         if rec.stop_loss >= rec.buy_price:
-            rec.stop_loss = round(rec.buy_price * 0.95, 2)
-
-        # 目标价：压力位 或 +5%~10%
-        target_by_resist = resistance if resistance > close else close * 1.08
-        target_by_atr = close + atr * 1.5 if atr > 0 else close * 1.05
-        rec.target_price = round(min(target_by_resist, target_by_atr, close * 1.15), 2)
-
-        # 确保目标价 > 买入价（至少3%利润空间）
-        if rec.target_price <= rec.buy_price * 1.03:
-            rec.target_price = round(rec.buy_price * 1.05, 2)
+            rec.stop_loss = round(rec.buy_price * 0.97, 2)
+        if rec.target_price <= rec.buy_price:
+            rec.target_price = round(rec.buy_price * 1.03, 2)
 
     def _apply_filters(
         self, recs: list[StockRecommendation],
@@ -785,6 +792,10 @@ class RecommendEngine:
                 reasons.append(f"放量突破(量比{rec.technical.volume_ratio:.1f})")
             if rec.technical.trend == "上涨":
                 reasons.append("均线多头排列")
+
+        # 炸板提示
+        if rec.open_count >= 1:
+            reasons.append(f"⚠ 炸板{rec.open_count}次，盘中封板失败")
 
         if not reasons:
             reasons.append("因子综合得分靠前")
