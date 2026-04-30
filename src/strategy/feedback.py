@@ -895,7 +895,7 @@ def main():
         if bak_path.exists():
             import shutil
             shutil.copy2(bak_path, engine.config_path)
-            print("  (dry-run) 配置已回滚")
+            logger.info("(dry-run) 配置已回滚")
     else:
         report = run_feedback(
             config_path=args.config,
@@ -904,7 +904,7 @@ def main():
             report_path=args.report,
         )
 
-    print(report.to_text())
+    logger.info(report.to_text())
 
 
 if __name__ == "__main__":

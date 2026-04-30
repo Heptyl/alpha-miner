@@ -112,13 +112,13 @@ def run_drift_pipeline(db: Storage, threshold: float = 1.5) -> list[dict]:
                                    f"threshold={threshold}",
                 }
                 events.append(event)
-                print(f"  DRIFT: {fn} @ {event['event_date']} — {event['description']}")
+                logger.info("DRIFT: %s @ %s — %s", fn, event['event_date'], event['description'])
     
     # 持久化 drift_events
     if events:
         df = pd.DataFrame(events)
         count = db.insert("drift_events", df)
-        print(f"  写入 {count} 条 drift_events")
+        logger.info("写入 %d 条 drift_events", count)
     
     return events
 
@@ -157,10 +157,10 @@ def run_regime_pipeline(db: Storage, date: str | None = None) -> dict | None:
         "details": regime_info.details,
         "persisted": count > 0,
     }
-    print(f"  Regime: {date} → {regime_info.regime} (conf={regime_info.confidence:.2f})")
+    logger.info("Regime: %s → %s (conf=%.2f)", date, regime_info.regime, regime_info.confidence)
     if regime_info.details:
         for k, v in regime_info.details.items():
-            print(f"    {k}: {v}")
+            logger.info("  %s: %s", k, v)
     
     return result
 
@@ -175,25 +175,25 @@ def run_full_pipeline(db_path: str = "data/alpha_miner.db") -> dict:
     db = Storage(db_path)
     db.init_db()
     
-    print("=" * 60)
-    print("Alpha Miner — 全管线运行")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Alpha Miner — 全管线运行")
+    logger.info("=" * 60)
     
     # 1. IC
-    print("\n[1/3] IC 计算...")
+    logger.info("[1/3] IC 计算...")
     ic_results = run_ic_pipeline(db)
     for fn, info in ic_results.items():
         ic_str = f"{info['avg_ic']:.4f}" if info['avg_ic'] == info['avg_ic'] else "N/A"
-        print(f"  {fn:25s}: {info['valid_ic']}/{info['dates']} valid IC, avg={ic_str}")
+        logger.info("%25s: %d/%d valid IC, avg=%s", fn, info['valid_ic'], info['dates'], ic_str)
     
     # 2. Drift
-    print("\n[2/3] 漂移检测...")
+    logger.info("[2/3] 漂移检测...")
     drift_events = run_drift_pipeline(db)
     if not drift_events:
-        print("  无漂移事件（数据不足或IC稳定）")
+        logger.info("无漂移事件（数据不足或IC稳定）")
     
     # 3. Regime
-    print("\n[3/3] Regime 识别...")
+    logger.info("[3/3] Regime 识别...")
     regime_result = run_regime_pipeline(db)
     
     # 汇总
@@ -204,10 +204,11 @@ def run_full_pipeline(db_path: str = "data/alpha_miner.db") -> dict:
         "regime": regime_result["regime"] if regime_result else "unknown",
     }
     
-    print("\n" + "=" * 60)
-    print(f"完成! IC因子: {summary['ic_factors']}, 有效IC: {summary['ic_with_data']}, "
-          f"漂移事件: {summary['drift_events']}, Regime: {summary['regime']}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("完成! IC因子: %d, 有效IC: %d, 漂移事件: %d, Regime: %s",
+                summary['ic_factors'], summary['ic_with_data'],
+                summary['drift_events'], summary['regime'])
+    logger.info("=" * 60)
     
     return summary
 

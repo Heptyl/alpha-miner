@@ -11,10 +11,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "data/alpha_miner.db"
 
@@ -333,7 +336,7 @@ def _default_llm_call(prompt: str) -> Optional[str]:
                 if attempt < 2:
                     import time; time.sleep(3)
                 else:
-                    print(f"  DeepSeek调用失败(重试3次): {e}")
+                    logger.warning("DeepSeek调用失败(重试3次): %s", e)
 
     # 2. 智谱 GLM（via Anthropic SDK 兼容）
     zai_key = os.environ.get("ZAI_API_KEY", "") or cfg_api.get("zhipu", {}).get("api_key", "")
@@ -352,7 +355,7 @@ def _default_llm_call(prompt: str) -> Optional[str]:
             )
             return message.content[0].text
         except Exception as e:
-            print(f"  Z.AI调用失败: {e}")
+            logger.warning("Z.AI调用失败: %s", e)
 
     # 2. OpenAI 兼容接口
     openai_key = os.environ.get("OPENAI_API_KEY", "") or cfg_api.get("openai", {}).get("api_key", "")
@@ -371,7 +374,7 @@ def _default_llm_call(prompt: str) -> Optional[str]:
             )
             return message.content[0].text
         except Exception as e:
-            print(f"  OpenAI调用失败: {e}")
+            logger.warning("OpenAI调用失败: %s", e)
 
     # 3. 通过 requests 直接调用（兜底）
     # 支持任意 OpenAI 兼容接口
@@ -390,11 +393,11 @@ def _default_llm_call(prompt: str) -> Optional[str]:
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"  LLM API调用失败: {e}")
+            logger.warning("LLM API调用失败: %s", e)
 
-    print("  LLM未配置API Key，请在以下任一位置配置：")
-    print("    - 环境变量: ZAI_API_KEY 或 OPENAI_API_KEY")
-    print("    - 配置文件: config/settings.yaml -> api.zhipu.api_key")
+    logger.warning("LLM未配置API Key，请在以下任一位置配置：")
+    logger.warning("  - 环境变量: ZAI_API_KEY 或 OPENAI_API_KEY")
+    logger.warning("  - 配置文件: config/settings.yaml -> api.zhipu.api_key")
     return None
 
 
@@ -407,7 +410,7 @@ def batch_analyze(
     """批量LLM分析。"""
     results = {}
     for i, code in enumerate(codes):
-        print(f"  LLM分析 [{i+1}/{len(codes)}] {code}...")
+        logger.info("LLM分析 [%d/%d] %s...", i+1, len(codes), code)
         analysis = analyze_with_llm(code, trade_date, db_path, llm_call_fn)
         if analysis:
             results[code] = analysis

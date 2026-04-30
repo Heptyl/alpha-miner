@@ -79,3 +79,34 @@ python -m cli.report --date 2024-06-15
 - 网络请求统一重试3次，间隔2秒
 - 非交易日返回空DataFrame
 - 所有CLI用click框架，rich美化输出
+
+## Harness Plugin（推荐）
+
+项目已集成 [claude-code-harness](https://github.com/Chachamaru127/claude-code-harness) 插件，
+提供 Plan→Work→Review 工作流、自动代码审查、Plans.md 任务管理等功能。
+
+### 首次安装（新开发者必做）
+
+```bash
+# 1. 添加 marketplace 并安装插件
+claude plugin marketplace add Chachamaru127/claude-code-harness
+claude plugin install claude-code-harness@claude-code-harness-marketplace
+
+# 2. 重新加载插件
+/reload-plugins
+```
+
+### 常用 Harness 指令
+
+| 指令 | 用途 |
+|------|------|
+| `/harness-plan` | 创建任务到 Plans.md |
+| `/harness-work` | 从 Plans.md 取任务执行 |
+| `/harness-review` | 代码审查 |
+| `/harness-sync` | 检查 Plans.md 与实现的对齐 |
+| `/breezing` | 并行团队执行多个任务 |
+
+### 项目级配置
+
+`.claude/settings.json` 已配置好插件启用和权限规则，提交到 git。
+其他开发者安装插件后无需额外配置即可使用。

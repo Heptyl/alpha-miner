@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -185,7 +188,7 @@ def run_review(
             break
 
     if rec_json is None:
-        print(f"  ⚠ 找不到 {review_date} 之前的推荐文件")
+        logger.warning("找不到 %s 之前的推荐文件", review_date)
         return None
 
     # 加载推荐
@@ -194,7 +197,7 @@ def run_review(
 
     rec_stocks = rec_data.get("stocks", [])
     if not rec_stocks:
-        print(f"  ⚠ {rec_date} 推荐列表为空")
+        logger.warning("%s 推荐列表为空", rec_date)
         return None
 
     # 从数据库加载今日实际走势
@@ -212,7 +215,7 @@ def run_review(
 
         if row is None:
             # 今日数据还没入库
-            print(f"  ⚠ {code} 无 {review_date} K线数据，跳过")
+            logger.warning("%s 无 %s K线数据，跳过", code, review_date)
             continue
 
         today_open, today_high, today_low, today_close = row

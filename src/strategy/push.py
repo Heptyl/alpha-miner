@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from src.strategy.recommend import DailyRecommendation
+
+logger = logging.getLogger(__name__)
 
 
 def _next_weekday(date_str: str) -> str:
@@ -82,7 +85,7 @@ def push_recommendation(
 
     # 5. 终端输出
     if print_terminal:
-        print(report.to_text())
+        logger.info(report.to_text())
 
     return results
 
