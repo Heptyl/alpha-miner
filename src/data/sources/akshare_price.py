@@ -169,39 +169,54 @@ def _fetch_tencent_full(trade_date: str) -> pd.DataFrame:
     return df
 
 
+def _clear_proxy() -> dict:
+    """清除代理环境变量（WSL2 Clash 会拦截腾讯/东财国内接口），返回旧值以便恢复。"""
+    import os
+    old = {}
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+              "all_proxy", "ALL_PROXY"):
+        v = os.environ.pop(k, None)
+        if v is not None:
+            old[k] = v
+    if old:
+        logger.info("已清除代理变量: %s", list(old.keys()))
+    return old
+
+
+def _restore_proxy(old: dict) -> None:
+    """恢复代理环境变量。"""
+    import os
+    for k, v in old.items():
+        os.environ[k] = v
+
+
 def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
-    """拉取日K线 — 智能选择数据源。
+    """拉取日K线 — 始终走腾讯全量。
 
-    策略：
-    1. 判断是否收盘（15:05 之后）：是 → 用 stock_zh_a_daily 拉重点股票
-    2. 否则（盘中/盘前）→ 用腾讯行情 qt.gtimg.cn 批量拉全市场
-    3. 主源失败 → 回退对方
+    腾讯行情 qt.gtimg.cn 实测 5200+ 只 / ~1.5s，稳定可靠。
+    旧逻辑收盘后只拉重点股票 ~600 只，导致 IC/漂移/进化链路失效，已废弃。
+
+    策略：腾讯全量 → 失败回退 stock_zh_a_daily（逐只，慢但稳）
     """
-    from datetime import datetime as _dt
+    old_proxy = _clear_proxy()
 
-    now = _dt.now()
-    # 15:05 之后认为收盘（留5分钟缓冲）
-    market_closed = now.hour > 15 or (now.hour == 15 and now.minute >= 5)
+    try:
+        # 主路径：腾讯全量（~1.5s 拉完 5200+ 只）
+        logger.info("fetch(%s): 腾讯全量模式", trade_date)
+        result = _fetch_tencent_full(trade_date)
+        if not result.empty:
+            return result
 
-    if market_closed:
-        # 收盘后：用 stock_zh_a_daily 拉重点股票（数据更准，有成交额等）
-        priority_codes = _get_priority_codes(trade_date)
-        if priority_codes:
-            logger.info("收盘模式: 重点股票 %d 只，stock_zh_a_daily", len(priority_codes))
-            result = _fetch_daily_ak_subset(trade_date, priority_codes, max_retries=retries)
-            if not result.empty:
-                return result
-        logger.info("收盘模式: stock_zh_a_daily 失败，回退腾讯行情")
-    else:
-        logger.info("盘中模式: 腾讯行情批量拉取")
+        # 回退：stock_zh_a_daily 全量（慢，逐只拉取）
+        logger.warning("腾讯全量失败，回退 stock_zh_a_daily 全量")
+        result = _fetch_daily_ak(trade_date, retries, multi_thread=True)
+        if not result.empty:
+            return result
 
-    # 盘中 / 回退：腾讯行情
-    result = _fetch_tencent_full(trade_date)
-    if not result.empty:
-        return result
-
-    logger.error("所有数据源均失败")
-    return pd.DataFrame()
+        logger.error("所有数据源均失败")
+        return pd.DataFrame()
+    finally:
+        _restore_proxy(old_proxy)
 
 
 def fetch_today(trade_date: str, retries: int = 3) -> pd.DataFrame:
