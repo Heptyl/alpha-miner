@@ -15,20 +15,23 @@ alpha-miner/
 │   ├── drift.py            #   漂移检测
 │   ├── backtest.py         #   单因子回测
 │   ├── replay.py           #   复盘引擎
-│   └── strategy.py         #   策略管理 (list/backtest/evolve/scan)
+│   ├── strategy.py         #   策略管理 (list/backtest/evolve/scan)
+│   ├── signal.py           #   选股信号
+│   ├── recommend.py        #   个股推荐
+│   └── query.py            #   数据查询
 ├── src/
-│   ├── data/               # 数据层 (Storage + 6 个 akshare 采集器)
+│   ├── data/               # 数据层 (Storage + 7 个数据源采集器)
 │   ├── factors/            # 因子库 (5 公式 + 4 叙事)
 │   ├── narrative/          # 叙事引擎 (新闻分类/剧本/复盘)
 │   ├── drift/              #   漂移检测 + 决策输出 (含动态 Regime 权重)
 │   ├── mining/             #   进化引擎 v2 (手术台+真实IC+定向变异+候选池)
-│   ├── strategy/           #   策略子系统 (回测/进化/持久化)
+│   ├── strategy/           #   策略子系统 (回测/进化/持久化/推荐/信号/风控)
 │   └── pipeline/           #   IC 管线 (批量计算 + 持久化)
 ├── factors/                # 进化产出的因子代码 (6 个已验收)
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
-├── config/                 # factors.yaml + settings.yaml
+├── config/                 # factors.yaml + settings.yaml.example + recommend.yaml
 ├── scripts/                # daily_run.sh + hourly_mine.sh
-├── tests/                  # 288 tests
+├── tests/                  # 349 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -38,7 +41,7 @@ alpha-miner/
 
 | 因子 | 级别 | 逻辑 |
 |------|------|------|
-| zt_ratio | 市场 | 涨停/(涨停+跌停)，情绪方向 |
+| zt_dt_ratio | 市场 | 涨停/(涨停+跌停)，情绪方向 |
 | consecutive_board | 股票 | 连板天数 × (1 - 开板率) |
 | main_flow_intensity | 股票 | 主力净流入 / 成交额 |
 | turnover_rank | 股票 | 换手率百分位排名 |
@@ -140,7 +143,7 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 测试 (288 tests)
+## 测试 (349 tests)
 
 硬断言测试 47 个 + 手术台测试 24 个 + 回测器测试 4 个 + 进化完整性测试 5 个。覆盖叙事因子/IC端到端/进化引擎/模板因子/手术台诊断/定向变异。
 

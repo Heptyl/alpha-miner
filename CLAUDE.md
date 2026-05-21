@@ -5,7 +5,7 @@ A股量化因子挖掘系统。基于行为金融学理论，从市场数据中�
 
 ## 环境
 - **OS**: WSL2 Ubuntu (Linux)
-- **Python**: 3.12+
+- **Python**: >= 3.11
 - **包管理**: uv
 - **数据库**: SQLite (data/alpha_miner.db)
 
@@ -20,6 +20,9 @@ src/
   drift/         — 因子漂移检测与IC追踪
   mining/        — 因子进化引擎
     prompts/     — LLM prompt模板
+  narrative/     — 叙事引擎 (新闻分类/剧本/复盘)
+  strategy/      — 策略子系统 (回测/进化/持久化/推荐/信号/风控)
+  pipeline/      — IC管线 (批量计算+持久化)
 cli/             — 命令行入口
 config/          — 配置文件
 knowledge_base/  — 理论知识库
@@ -47,6 +50,11 @@ tests/           — 测试
 - `drift_events` — 漂移事件记录
 - `regime_state` — 市场状态
 - `mining_log` — 挖掘日志
+- `market_scripts` — 市场剧本
+- `replay_log` — 复盘记录
+- `strategy_defs` — 策略定义
+- `strategy_reports` — 回测报告
+- `strategy_trades` — 交易记录
 
 ## 常用命令
 ```bash

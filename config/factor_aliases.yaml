@@ -1,0 +1,41 @@
+# 因子中文别名映射表
+# 用于微信推送时用中文名代替英文因子名
+
+factors:
+  # 公式因子
+  zt_dt_ratio:
+    cn: 涨跌比
+    desc: 涨停/(涨停+跌停)，全市场情绪温度计
+    
+  consecutive_board:
+    cn: 连板高度
+    desc: 个股连续涨停天数，接力情绪指标
+    
+  main_flow_intensity:
+    cn: 主力强度
+    desc: 主力净流入占成交额比，大资金参与度
+    
+  turnover_rank:
+    cn: 换手排名
+    desc: 换手率在全市场百分位，资金关注度
+    
+  lhb_institution:
+    cn: 机构买入
+    desc: 龙虎榜机构净买入额，专业资金信号
+
+  # 叙事因子
+  theme_lifecycle:
+    cn: 题材生命
+    desc: 题材连续涨停天数→生命周期(萌芽/爆发/衰退)
+    
+  narrative_velocity:
+    cn: 叙事速度
+    desc: 新闻数量3日变化率，信息传播速度
+    
+  theme_crowding:
+    cn: 题材拥挤
+    desc: 题材内涨停股占比，越高说明越拥挤
+    
+  leader_clarity:
+    cn: 龙头清晰
+    desc: 龙头成交额/第二名成交额，龙头辨识度

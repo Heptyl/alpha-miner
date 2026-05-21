@@ -14,7 +14,10 @@ alpha-miner/
 │   ├── drift.py            #   漂移检测
 │   ├── backtest.py         #   单因子回测
 │   ├── replay.py           #   复盘引擎 CLI
-│   └── strategy.py         #   策略管理 (list/backtest/evolve/scan)
+│   ├── strategy.py         #   策略管理 (list/backtest/evolve/scan)
+│   ├── signal.py           #   选股信号
+│   ├── recommend.py        #   个股推荐
+│   └── query.py            #   数据查询
 ├── src/
 │   ├── data/               # 数据层
 │   │   ├── schema.sql      #   SQLite 表结构 (20 张表)
@@ -90,18 +93,20 @@ alpha-miner/
 │   └── strategies.yaml     #   预置策略 (5 个)
 ├── config/
 │   ├── factors.yaml        #   因子注册表
+│   ├── factor_aliases.yaml #   因子中文别名映射
+│   ├── recommend.yaml      #   个股推荐配置
 │   └── settings.yaml       #   全局配置
 ├── scripts/
 │   ├── daily_run.sh        #   每日 7 步完整流程
 │   ├── hourly_mine.sh      #   定时进化挖掘
 │   └── compute_factors.py  #   因子计算脚本
-├── tests/                  # 288 tests
+├── tests/                  # 349 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
 ## 因子详细说明
 
-### zt_ratio (市场级)
+### zt_dt_ratio (市场级)
 
 涨停/(涨停+跌停) 比率。市场级情绪因子，反映当日多空力量对比。
 
@@ -508,7 +513,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试 (288 tests)
+## 测试 (349 tests)
 
 ### 硬断言测试 (47 个)
 
@@ -567,7 +572,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 - **因子注册**：FactorRegistry 自动扫描 `src/factors/` 下 BaseFactor 子类，CLI 无需硬编码因子列表
 - **CUSUM 变点**：递归分割 + 标准化累积偏差，阈值可调
 - **市场状态**：多信号投票，置信度最高的 regime 胜出
-- **情感引擎**：金融关键词规则引擎替代 snownlp，针对 A 股语料优化
+- **情感引擎**：金融关键词规则引擎 + snownlp 混合，针对 A 股语料优化
 - **新闻分类**：规则引擎 + LLM fallback，高置信度跳过 LLM 节省成本
 - **LLM 可选**：所有模块 llm_client=None 时走规则路径，系统照常运行
 - **LLM Client**：三级 fallback (env → openclaw.json → hermes auth.json)
@@ -581,9 +586,9 @@ database:
   path: "data/alpha_miner.db"
 
 api:
-  anthropic:
+  deepseek:
     api_key: "YOUR_KEY_HERE"
-    model: "claude-sonnet-4-20250514"
+    model: "deepseek-v4-flash"
 
 collector:
   retry_count: 3
