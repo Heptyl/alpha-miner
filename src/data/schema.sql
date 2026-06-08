@@ -291,3 +291,24 @@ CREATE TABLE IF NOT EXISTS strategy_trades (
 
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_name ON strategy_trades(strategy_name);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_date ON strategy_trades(entry_date);
+
+-- ═══════════════════════════════════════════════════════════
+-- 叙事母题标注层（决策D：人工/GLM 标注，量化盲区特征不自动因子化）
+-- 承载《龙头叙事解剖》案例库：每只标注 叙事母题 + 谢林点来源 + 量化盲区
+-- ═══════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS narrative_archetype (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date       TEXT NOT NULL,
+    stock_code       TEXT NOT NULL,
+    archetype        TEXT,                   -- 叙事母题(主线趋势型/游资玄学型/...)
+    schelling_source TEXT,                   -- 谢林点来源: human(人为) / natural(自然)
+    quant_blindspot  TEXT,                   -- 量化盲区特征(玄学/谐音/两岸母题等)
+    is_human_supply  INTEGER DEFAULT 0,      -- 1=量化无法定价的人工供给特征(edge来源)
+    source           TEXT DEFAULT 'manual',  -- manual / glm
+    note             TEXT,
+    snapshot_time    TEXT DEFAULT (datetime('now')),
+    UNIQUE(trade_date, stock_code, archetype)
+);
+
+CREATE INDEX IF NOT EXISTS idx_narrative_archetype_code ON narrative_archetype(stock_code);
+CREATE INDEX IF NOT EXISTS idx_narrative_archetype_date ON narrative_archetype(trade_date);

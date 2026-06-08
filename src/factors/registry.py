@@ -17,6 +17,7 @@ class FactorRegistry:
 
     def __init__(self):
         self._factors: dict[str, BaseFactor] = {}
+        self._roles: dict[str, str] = {}   # name -> "alpha" / "filter" (决策D)
 
     def load_from_yaml(self, yaml_path: str = "config/factors.yaml") -> None:
         """从 YAML 文件加载因子配置。"""
@@ -34,6 +35,7 @@ class FactorRegistry:
                     factor = cls()
                     factor.name = factor_def["name"]
                     self._factors[factor_def["name"]] = factor
+                    self._roles[factor_def["name"]] = factor_def.get("role", "alpha")
                 except (ImportError, AttributeError) as e:
                     print(f"Warning: 无法加载因子 {factor_def['name']}: {e}")
 
@@ -45,11 +47,19 @@ class FactorRegistry:
             raise KeyError(f"因子 '{name}' 未注册。可用因子: {list(self._factors.keys())}")
         return self._factors[name]
 
-    def list_factors(self) -> list[str]:
-        """列出所有已注册的因子名称。"""
+    def list_factors(self, role: Optional[str] = None) -> list[str]:
+        """列出已注册因子名称。role 给定时只返回该角色(alpha/filter)的因子。"""
         if not self._factors:
             self.load_from_yaml()
-        return list(self._factors.keys())
+        if role is None:
+            return list(self._factors.keys())
+        return [n for n in self._factors if self._roles.get(n, "alpha") == role]
+
+    def get_role(self, name: str) -> str:
+        """返回因子角色 alpha/filter（决策D）。"""
+        if not self._factors:
+            self.load_from_yaml()
+        return self._roles.get(name, "alpha")
 
     def register(self, name: str, factor: BaseFactor) -> None:
         """手动注册一个因子。"""

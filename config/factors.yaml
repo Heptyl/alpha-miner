@@ -1,4 +1,5 @@
 # 因子注册表
+# role: alpha = 收益来源(参与打分/体检) ; filter = 风控否决项(决策D：不作 alpha，仅作过滤)
 
 formula_factors:
   - name: zt_dt_ratio
@@ -6,6 +7,7 @@ formula_factors:
     module: src.factors.formula.zt_ratio
     description: "涨停/(涨停+跌停) — 市场级情绪因子"
     factor_type: market
+    role: alpha
     lookback_days: 1
 
   - name: consecutive_board
@@ -13,6 +15,7 @@ formula_factors:
     module: src.factors.formula.consecutive_board
     description: "连板数 — 接力情绪指标"
     factor_type: stock
+    role: alpha
     lookback_days: 1
 
   - name: main_flow_intensity
@@ -20,6 +23,7 @@ formula_factors:
     module: src.factors.formula.main_flow_intensity
     description: "主力净流入/成交额 — 大资金参与强度"
     factor_type: stock
+    role: alpha
     lookback_days: 1
 
   - name: turnover_rank
@@ -27,6 +31,7 @@ formula_factors:
     module: src.factors.formula.turnover_rank
     description: "换手率百分位排名 — 资金关注度"
     factor_type: stock
+    role: alpha
     lookback_days: 1
 
   - name: lhb_institution
@@ -34,6 +39,7 @@ formula_factors:
     module: src.factors.formula.lhb_institution
     description: "龙虎榜机构净买入额 — 专业资金信号"
     factor_type: stock
+    role: alpha
     lookback_days: 1
 
 narrative_factors:
@@ -42,6 +48,7 @@ narrative_factors:
     module: src.factors.narrative.theme_lifecycle
     description: "题材连续涨停天数→生命周期阶段分数"
     factor_type: stock
+    role: alpha
     lookback_days: 10
 
   - name: narrative_velocity
@@ -49,18 +56,22 @@ narrative_factors:
     module: src.factors.narrative.narrative_velocity
     description: "新闻数量3日变化率"
     factor_type: stock
+    role: alpha
     lookback_days: 5
 
+  # 决策D：拥挤度/同质化定位为风控 filter(否决项)，不是 alpha 来源
   - name: theme_crowding
     class: ThemeCrowdingFactor
     module: src.factors.narrative.theme_crowding
-    description: "题材涨停占比，拥挤度越高分数越低"
+    description: "题材涨停占比，拥挤度越高分数越低（风控过滤项）"
     factor_type: stock
+    role: filter
     lookback_days: 5
 
   - name: leader_clarity
     class: LeaderClarityFactor
     module: src.factors.narrative.leader_clarity
-    description: "龙头成交额/第二名成交额"
+    description: "龙头成交额/第二名成交额（亦为 pricing_regime 输入）"
     factor_type: stock
+    role: alpha
     lookback_days: 1

@@ -100,3 +100,82 @@ class RegimeDetector:
         return RegimeInfo(regime="normal", confidence=1.0, details={
             "zt_count": zt_count, "highest_board": highest_board,
         })
+
+
+@dataclass
+class PricingRegimeInfo:
+    """定价权 regime 信息（决策B：与情绪 regime 正交的独立轴）。"""
+    regime: str          # hot_money_led / quant_led / mixed
+    confidence: float
+    details: dict
+
+
+class PricingRegimeDetector:
+    """定价权 regime 检测器 —— 游资主导 vs 量化主导。
+
+    判别特征（决策B）：
+    - 龙头唯一性：当日 leader_clarity 高分位高 = 游资造妖、龙头清晰。
+    - 连板高度衰减斜率：近 lookback 交易日最高连板数持续走低 = 量化套利压制高度。
+
+    规则：
+    - hot_money_led: 龙头清晰 且 高度未持续衰减
+    - quant_led:     龙头不清晰 且 高度持续衰减
+    - mixed:         其余（含数据不足）
+    阈值为经验值，是人工闸门，可按盘面校准。
+    """
+
+    REGIMES = ["hot_money_led", "quant_led", "mixed"]
+
+    def __init__(self, db: Storage, lookback: int = 6,
+                 clarity_thr: float = 0.6, slope_thr: float = -0.15):
+        self.db = db
+        self.lookback = lookback
+        self.clarity_thr = clarity_thr
+        self.slope_thr = slope_thr
+
+    def detect(self, as_of: datetime) -> PricingRegimeInfo:
+        date_str = as_of.strftime("%Y-%m-%d")
+
+        # ── 连板高度衰减斜率：近 lookback 交易日 max(consecutive_zt) ──
+        rows = self.db.execute(
+            "SELECT trade_date AS d, MAX(consecutive_zt) AS m FROM zt_pool "
+            "WHERE trade_date <= ? GROUP BY trade_date ORDER BY trade_date DESC LIMIT ?",
+            (date_str, self.lookback),
+        )
+        heights = [r["m"] for r in reversed(rows)]   # 旧 -> 新
+        slope = 0.0
+        if len(heights) >= 3:
+            slope = float(np.polyfit(range(len(heights)), heights, 1)[0])
+
+        # ── 龙头唯一性：当日 leader_clarity 的 p75 ──
+        cr = self.db.execute(
+            "SELECT factor_value AS v FROM factor_values "
+            "WHERE factor_name = 'leader_clarity' AND trade_date = ? "
+            "AND factor_value IS NOT NULL",
+            (date_str,),
+        )
+        clarity_vals = [r["v"] for r in cr]
+        clarity = float(np.percentile(clarity_vals, 75)) if clarity_vals else float("nan")
+
+        details = {
+            "leader_clarity_p75": None if np.isnan(clarity) else round(clarity, 3),
+            "height_slope": round(slope, 3),
+            "heights": heights,
+        }
+
+        if np.isnan(clarity):
+            return PricingRegimeInfo("mixed", 0.3, details)
+
+        clarity_high = clarity >= self.clarity_thr
+        slope_down = slope <= self.slope_thr
+
+        if clarity_high and not slope_down:
+            regime = "hot_money_led"
+            conf = min(1.0, 0.5 + (clarity - self.clarity_thr))
+        elif slope_down and not clarity_high:
+            regime = "quant_led"
+            conf = min(1.0, 0.5 + (self.slope_thr - slope) * 0.3)
+        else:
+            regime = "mixed"
+            conf = 0.5
+        return PricingRegimeInfo(regime, round(conf, 3), details)
