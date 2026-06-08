@@ -64,24 +64,33 @@ def push_recommendation(
                 tmp.write(push_text)
                 tmp_path = tmp.name
             # 用 Hermes gateway 的 weixin 发送
-            result = subprocess.run(
-                [
-                    '/home/ccy/.hermes/hermes-agent/venv/bin/python',
-                    str(Path(__file__).parent.parent.parent / 'scripts' / 'send_wechat.py'),
-                    tmp_path,
-                ],
-                capture_output=True, text=True, timeout=30,
-                env={
-                    **dict(__import__('os').environ),
-                    'WEIXIN_CHAT_ID': target,
-                },
-            )
-            Path(tmp_path).unlink(missing_ok=True)
-            if result.returncode == 0:
-                results["wechat"] = "ok"
+            import os
+            # hermes python 路径可配置(HERMES_PYTHON)，默认原 Linux 路径；
+            # 找不到则优雅跳过(如 Windows 上无 hermes-agent)，不影响主流程。
+            hermes_py = os.environ.get(
+                "HERMES_PYTHON", "/home/ccy/.hermes/hermes-agent/venv/bin/python")
+            if not Path(hermes_py).exists():
+                logger.info(
+                    "微信推送跳过: 未找到 hermes python (%s)，设 HERMES_PYTHON 环境变量以启用",
+                    hermes_py)
+                results["wechat"] = "skipped"
+                Path(tmp_path).unlink(missing_ok=True)
             else:
-                logger.warning("微信推送失败: %s", result.stderr[:200])
-                results["wechat"] = "error"
+                result = subprocess.run(
+                    [
+                        hermes_py,
+                        str(Path(__file__).parent.parent.parent / 'scripts' / 'send_wechat.py'),
+                        tmp_path,
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                    env={**os.environ, 'WEIXIN_CHAT_ID': target},
+                )
+                Path(tmp_path).unlink(missing_ok=True)
+                if result.returncode == 0:
+                    results["wechat"] = "ok"
+                else:
+                    logger.warning("微信推送失败: %s", result.stderr[:200])
+                    results["wechat"] = "error"
         except Exception as e:
             logger.warning("微信推送异常: %s", e)
             results["wechat"] = "error"

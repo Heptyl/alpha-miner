@@ -37,6 +37,9 @@ if __name__ == "__main__":
     elif sub == "replay":
         from cli.replay import main
         main()
+    elif sub == "daily":
+        from cli.daily import main
+        main()
     elif sub == "strategy":
         from cli.strategy import main
         main()
@@ -64,6 +67,7 @@ if __name__ == "__main__":
         print("  signal    次日选股信号")
         print("  recommend 每日个股推荐(含买入点位)")
         print("  query     查询股票数据/市场概览")
+        print("  daily     每日完整流程 (跨平台, 替代 daily_run.sh)")
     else:
         print(f"Unknown command: {sub}")
         sys.exit(1)
