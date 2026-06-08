@@ -190,7 +190,7 @@ def cmd_history(args):
         print("[INFO] 无挖掘记录")
         return
 
-    lines = log_path.read_text().strip().split("\n")
+    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
     if not lines or lines[0] == "":
         print("[INFO] 无挖掘记录")
         return
@@ -223,7 +223,7 @@ def cmd_lineage(args):
         print("[INFO] 无挖掘记录")
         return
 
-    lines = log_path.read_text().strip().split("\n")
+    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
     records = []
     for line in lines:
         try:

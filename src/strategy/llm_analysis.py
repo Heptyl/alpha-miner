@@ -296,7 +296,7 @@ def _default_llm_call(prompt: str) -> Optional[str]:
     cfg_api = {}
     if settings_path.exists():
         try:
-            with open(settings_path) as f:
+            with open(settings_path, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
             cfg_api = cfg.get("api", {})
         except Exception:

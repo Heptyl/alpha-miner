@@ -19,7 +19,7 @@ def main():
 
     try:
         # 读取并执行因子代码
-        with open(code_path) as f:
+        with open(code_path, encoding="utf-8") as f:
             code = f.read()
 
         # 在受限命名空间执行，注入基础依赖

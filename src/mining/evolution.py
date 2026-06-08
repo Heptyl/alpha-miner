@@ -145,7 +145,7 @@ class EvolutionEngine:
             logger.warning("知识库不存在: %s", self.kb_path)
             return []
 
-        with open(self.kb_path) as f:
+        with open(self.kb_path, encoding="utf-8") as f:
             kb = yaml.safe_load(f)
 
         candidates = []
@@ -190,7 +190,7 @@ class EvolutionEngine:
             return failure_counts
 
         try:
-            with open(self.mining_log_path) as f:
+            with open(self.mining_log_path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -219,7 +219,7 @@ class EvolutionEngine:
 
         prompt_path = PROMPTS_DIR / "construct.md"
         if prompt_path.exists():
-            prompt_template = prompt_path.read_text()
+            prompt_template = prompt_path.read_text(encoding="utf-8")
         else:
             prompt_template = "将以下因子假说翻译为 Python 代码，实现 compute(universe, as_of, db) 方法:\n\n{config}"
 
@@ -1033,5 +1033,5 @@ def compute(universe, as_of, db):
             **candidate.to_dict(),
         }
         self.log.append(entry)
-        with open(self.mining_log_path, "a") as f:
+        with open(self.mining_log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

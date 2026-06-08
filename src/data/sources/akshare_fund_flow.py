@@ -48,7 +48,7 @@ _PAGE_DELAY = 0.8  # 每页间隔秒数
 def _get_ths_v_code() -> str:
     """获取同花顺 hexin-v 验证码。"""
     js_code = py_mini_racer.MiniRacer()
-    with open(_THS_JS_PATH) as f:
+    with open(_THS_JS_PATH, encoding="utf-8") as f:
         js_code.eval(f.read())
     return js_code.call("v")
 

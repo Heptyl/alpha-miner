@@ -177,7 +177,7 @@ class DailyReport:
             return "\n".join(lines)
 
         records = []
-        for line in self.mining_log_path.read_text().strip().split("\n"):
+        for line in self.mining_log_path.read_text(encoding="utf-8").strip().split("\n"):
             try:
                 r = json.loads(line)
                 if r.get("timestamp", "").startswith(date_str):
@@ -308,7 +308,7 @@ class DailyReport:
 
         # 挖掘日志
         if self.mining_log_path.exists():
-            log_lines = self.mining_log_path.read_text().strip().split("\n")
+            log_lines = self.mining_log_path.read_text(encoding="utf-8").strip().split("\n")
             lines.append(f"  {'mining_log':<20} {len(log_lines)} records")
         else:
             lines.append(f"  {'mining_log':<20} 0 records")
