@@ -49,6 +49,12 @@ if __name__ == "__main__":
     elif sub == "recommend":
         from cli.recommend import main
         main()
+    elif sub == "daily":
+        from cli.daily import main
+        main()
+    elif sub == "tradeplan":
+        from cli.tradeplan import main
+        main()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()
@@ -63,6 +69,8 @@ if __name__ == "__main__":
         print("  strategy  策略管理 (list/backtest/evolve/scan)")
         print("  signal    次日选股信号")
         print("  recommend 每日个股推荐(含买入点位)")
+        print("  daily     一条龙(采集→因子→推荐→推送)")
+        print("  tradeplan 次日交易计划(选股+仓位+止损止盈)")
         print("  query     查询股票数据/市场概览")
     else:
         print(f"Unknown command: {sub}")

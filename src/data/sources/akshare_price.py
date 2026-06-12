@@ -204,8 +204,125 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def fetch_baostock_full(trade_date: str) -> pd.DataFrame:
+    """用 baostock 全量拉取 A 股日 K 线 (免费无限流，串行调用).
+
+    baostock 不是线程安全的，必须串行调用。
+    每只约 0.05s，~5500 只约 5 分钟。
+    """
+    import baostock as bs
+
+    # baostock 全部接口统一用 YYYY-MM-DD
+    date_bs = trade_date  # query_all_stock + query_history_k_data_plus 都用此格式
+
+    # login / logout 必须成对出现
+    lg = bs.login()
+    if lg.error_code != "0":
+        logger.error("baostock login 失败: %s", lg.error_msg)
+        return pd.DataFrame()
+
+    try:
+        # 1) 获取全量 A 股代码
+        rs = bs.query_all_stock(day=date_bs)
+        if rs.error_code != "0":
+            logger.error("baostock query_all_stock 失败: %s", rs.error_msg)
+            return pd.DataFrame()
+
+        all_codes = []
+        while rs.error_code == "0" and rs.next():
+            row = rs.get_row_data()
+            code = row[0]  # e.g. "sh.600000"
+            # 只保留沪深 A 股: sh.6*, sz.0*, sz.3*
+            if (code.startswith("sh.6") or code.startswith("sz.0") or code.startswith("sz.3")) \
+                    and len(code) == 9:
+                all_codes.append(code)
+
+        logger.info("baostock 全量采集: %d 只 A 股, 目标日期 %s", len(all_codes), trade_date)
+
+        # 2) 逐只拉取日 K 线
+        fields = "date,code,open,high,low,close,preclose,volume,amount,turn"
+        results = []
+        success_count = 0
+        skip_count = 0
+
+        for i, bs_code in enumerate(all_codes):
+            try:
+                rs = bs.query_history_k_data_plus(
+                    code=bs_code,
+                    fields=fields,
+                    start_date=date_bs,
+                    end_date=date_bs,
+                    frequency="d",
+                    adjustflag="3",  # 不复权
+                )
+                if rs.error_code != "0":
+                    skip_count += 1
+                    continue
+
+                while rs.error_code == "0" and rs.next():
+                    row = rs.get_row_data()
+                    # row: [date, code, open, high, low, close, preclose, volume, amount, turn]
+                    try:
+                        stock_code = row[1].replace("sh.", "").replace("sz.", "")
+                        close_val = float(row[5]) if row[5] else 0.0
+                        if close_val <= 0:
+                            # 停牌或无数据
+                            skip_count += 1
+                            continue
+                        results.append({
+                            "stock_code": stock_code,
+                            "trade_date": trade_date,
+                            "open": float(row[2]) if row[2] else None,
+                            "high": float(row[3]) if row[3] else None,
+                            "low": float(row[4]) if row[4] else None,
+                            "close": close_val,
+                            "pre_close": float(row[6]) if row[6] else None,
+                            "volume": float(row[7]) if row[7] else None,
+                            "amount": float(row[8]) if row[8] else None,
+                            "turnover_rate": float(row[9]) if row[9] else None,
+                        })
+                        success_count += 1
+                    except (ValueError, IndexError):
+                        skip_count += 1
+                        continue
+
+            except Exception as e:
+                logger.debug("baostock 单只失败 %s: %s", bs_code, e)
+                skip_count += 1
+                continue
+
+            # 每 500 只打印一次进度
+            if (i + 1) % 500 == 0:
+                logger.info("baostock 进度: %d/%d (成功 %d, 跳过 %d)",
+                            i + 1, len(all_codes), success_count, skip_count)
+
+        logger.info("baostock 全量采集完成: 成功 %d, 跳过 %d / 总计 %d",
+                     success_count, skip_count, len(all_codes))
+
+        if not results:
+            return pd.DataFrame()
+
+        return pd.DataFrame(results)
+
+    finally:
+        bs.logout()
+
+
 def fetch_today(trade_date: str, retries: int = 3) -> pd.DataFrame:
-    """拉取当日实时行情快照 — 只拉重点股票。"""
+    """拉取当日全量行情 — 收盘后用 baostock 全量拉取."""
+    from datetime import datetime as _dt
+
+    now = _dt.now()
+    market_closed = now.hour > 15 or (now.hour == 15 and now.minute >= 5)
+
+    if market_closed:
+        # 收盘后: baostock 全量拉取 (免费无限流)
+        result = fetch_baostock_full(trade_date)
+        if not result.empty:
+            return result
+        # baostock 失败, 回退重点股票模式
+        logger.warning("baostock 全量失败，回退重点股票模式")
+
     return fetch(trade_date, retries=retries)
 
 

@@ -110,3 +110,45 @@ claude plugin install claude-code-harness@claude-code-harness-marketplace
 
 `.claude/settings.json` 已配置好插件启用和权限规则，提交到 git。
 其他开发者安装插件后无需额外配置即可使用。
+
+## 多Agent协作：Hermes(总指挥) + Claude Code(执行员)
+
+### 角色分工
+
+**Hermes（总指挥）** — 负责"做什么"
+- 市场研判：每日盘前给出市场情绪判断 + 操作方向
+- 策略决策：决定启用/禁用哪个策略，资金分配
+- 风控红线：设定当日最大亏损、清仓阈值
+- 异常裁决：极端行情下的应急决策
+- **不碰代码**：只给策略意图和风控参数，不指定具体实现
+
+**Claude Code（执行员）** — 负责"怎么做并且做对"
+- 代码实现：按Hermes指令编写/修改策略代码
+- 质量把控：代码审查、测试、确保无bug上线
+- 数据验证：回测结果验证，确保无未来数据泄漏
+- 执行反馈：向Hermes报告执行结果和异常
+- **不碰决策**：不自行决定买卖方向、仓位大小、策略启用
+
+### 协作规则
+
+1. **代码质量一票否决** — Claude Code认为代码有风险时，可拒绝上线并说明理由
+2. **变更需双向确认** — Hermes的指令Claude确认可执行，Claude的实现Hermes确认符合意图
+3. **每笔交易可追溯** — 决策链路全程留痕：Hermes指令 → Claude实现 → 执行结果
+4. **风控不妥协** — 无论Hermes如何要求，风控红线（止损/仓位限制）不可突破
+5. **数据先行** — 任何策略调整必须先有回测数据支撑，不接受"感觉"式决策
+
+### MCP 工具
+
+| 工具 | 用途 |
+|------|------|
+| sqlite-tools | 直接查询 alpha_miner.db |
+| code-understanding | 深度理解代码架构 |
+| knowledge-graph | 图谱化持久记忆 |
+
+### 自定义 Skills
+
+| Skill | 用途 |
+|-------|------|
+| `/a-share-backtest-review` | 回测结果审查 |
+| `/trading-risk-check` | 交易风控检查 |
+| `/strategy-postmortem` | 策略复盘 |

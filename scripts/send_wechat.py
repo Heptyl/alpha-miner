@@ -1,42 +1,60 @@
 #!/usr/bin/env python3
-"""Send a message via Weixin using the Hermes gateway internals."""
+"""Send a message via Weixin using the Alpha Miner push module.
+
+用法:
+  echo "消息内容" | uv run python scripts/send_wechat.py
+  uv run python scripts/send_wechat.py message.txt
+  uv run python scripts/send_wechat.py --brief          # 发送盘后简报
+  uv run python scripts/send_wechat.py --brief --date 2026-04-30
+"""
+import argparse
 import asyncio
-import sys
+import json
 import os
+import sys
 
-sys.path.insert(0, '/home/ccy/.hermes/hermes-agent')
-os.chdir('/home/ccy/.hermes/hermes-agent')
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
-import yaml
-from gateway.platforms.weixin import send_weixin_direct
-from gateway.config import PlatformConfig
 
-# Read Hermes config
-with open('/home/ccy/.hermes/config.yaml') as f:
-    config = yaml.safe_load(f)
+def main():
+    parser = argparse.ArgumentParser(description="微信推送")
+    parser.add_argument("msg_file", nargs="?", help="消息文本文件路径")
+    parser.add_argument("--brief", action="store_true", help="发送盘后简报")
+    parser.add_argument("--date", type=str, default="", help="简报日期 YYYY-MM-DD")
+    parser.add_argument("--db", type=str, default=f"{project_root}/data/alpha_miner.db", help="数据库路径")
+    args = parser.parse_args()
 
-weixin_cfg = config.get('platforms', {}).get('weixin', {})
-token = weixin_cfg.get('token', '')
-extra = weixin_cfg.get('extra', {})
+    if args.brief:
+        from src.drift.push import format_daily_brief_for_wechat, push_message_sync
 
-# Read message from file
-if len(sys.argv) > 1:
-    msg_file = sys.argv[1]
-    with open(msg_file) as f:
-        msg = f.read()
-else:
-    msg = sys.stdin.read()
+        msg = format_daily_brief_for_wechat(args.db, date=args.date)
+        print("--- 简报内容 ---")
+        print(msg)
+        print("--- 推送中 ---")
+    else:
+        from src.drift.push import push_message_sync
 
-# The full chat_id from the environment
-chat_id = os.environ.get('WECHAT_CHAT_ID', 'o9cq8087nG_q9BSnWk0INqZlCaSI@im.wechat')
+        if args.msg_file:
+            with open(args.msg_file) as f:
+                msg = f.read()
+        else:
+            msg = sys.stdin.read()
+        msg = msg.strip()
+        if not msg:
+            print("[ERROR] 消息为空")
+            sys.exit(1)
 
-result = asyncio.run(send_weixin_direct(
-    extra=extra,
-    token=token,
-    chat_id=chat_id,
-    message=msg.strip(),
-))
+    result = push_message_sync(msg)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
-print(f"Result: {result}")
-if result.get('error'):
-    sys.exit(1)
+    if result.get("success"):
+        print("[OK] 推送成功！")
+    else:
+        print(f"[FAIL] 推送失败: {result.get('error', '未知错误')}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -250,7 +250,7 @@ class TestPush:
     def test_report_to_text(self, sample_report):
         text = sample_report.to_text()
         assert "Alpha Miner 每日个股推荐" in text
-        assert "买入区间" in text
+        assert "建议买价" in text or "入场策略" in text
         assert "目标价位" in text
         assert "止损价位" in text
 

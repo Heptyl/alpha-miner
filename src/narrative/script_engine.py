@@ -65,8 +65,9 @@ class ScriptEngine:
 
     def __init__(self, db: Storage, llm_client=None):
         self.db = db
-        self.llm_client = llm_client
         self.brief = DailyBrief(db)
+        self.llm_client = llm_client
+        self._llm_model = "glm-4-plus" if llm_client is not None else ""
 
     def generate(self, as_of: datetime, report_date: str = "") -> MarketScript:
         """生成当日市场剧本。"""
@@ -254,7 +255,7 @@ class ScriptEngine:
 
         try:
             response = self.llm_client.messages.create(
-                model="glm-4-plus",
+                model=self._llm_model,
                 max_tokens=1500,
                 temperature=0.3,
                 messages=[{"role": "user", "content": prompt}],

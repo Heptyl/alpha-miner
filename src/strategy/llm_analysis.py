@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "data/alpha_miner.db"
 
+# 模块级标志：LLM Key 未配置只警告一次
+_llm_key_warned = False
+
 
 @dataclass
 class LLMAnalysis:
@@ -280,125 +283,10 @@ def analyze_with_llm(
 
 
 def _default_llm_call(prompt: str) -> Optional[str]:
-    """默认LLM调用 — 支持多种 API provider。
-
-    优先级：
-    1. ZAI_API_KEY 环境变量（智谱/GLM via Anthropic SDK）
-    2. OPENAI_API_KEY 环境变量（OpenAI 兼容接口）
-    3. 配置文件 config/settings.yaml 中的 api 配置
-    """
-    import os
-    import yaml
-    from pathlib import Path
-
-    # 尝试从配置文件加载
-    settings_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-    cfg_api = {}
-    if settings_path.exists():
-        try:
-            with open(settings_path) as f:
-                cfg = yaml.safe_load(f) or {}
-            cfg_api = cfg.get("api", {})
-        except Exception:
-            pass
-
-    # 1. DeepSeek（OpenAI 兼容，推荐）
-    ds_key = os.environ.get("DEEPSEEK_API_KEY", "") or cfg_api.get("deepseek", {}).get("api_key", "")
-    if ds_key and ds_key not in ("YOUR_KEY_HERE", "YOUR_DEEPSEEK_KEY_HERE"):
-        import requests as req
-        base_url = os.environ.get(
-            "DEEPSEEK_BASE_URL",
-            cfg_api.get("deepseek", {}).get("base_url", "https://api.deepseek.com/"),
-        )
-        model = cfg_api.get("deepseek", {}).get("model", "deepseek-v4-flash")
-        if not base_url.endswith("/"):
-            base_url += "/"
-        # 重试3次，网络不稳定时自动重连
-        for attempt in range(3):
-            try:
-                resp = req.post(
-                    f"{base_url}chat/completions",
-                    headers={"Authorization": f"Bearer {ds_key}", "Content-Type": "application/json"},
-                    json={"model": model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}]},
-                    timeout=120,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"].get("content", "")
-                # v4-flash 是推理模型，content 可能为空但有 reasoning_content
-                if not content:
-                    reasoning = data["choices"][0]["message"].get("reasoning_content", "")
-                    if reasoning:
-                        # 从推理内容中提取最后一段作为回复
-                        content = reasoning.split("\n")[-1].strip() if reasoning else ""
-                return content if content else None
-            except Exception as e:
-                if attempt < 2:
-                    import time; time.sleep(3)
-                else:
-                    logger.warning("DeepSeek调用失败(重试3次): %s", e)
-
-    # 2. 智谱 GLM（via Anthropic SDK 兼容）
-    zai_key = os.environ.get("ZAI_API_KEY", "") or cfg_api.get("zhipu", {}).get("api_key", "")
-    if zai_key and zai_key != "YOUR_KEY_HERE":
-        try:
-            import anthropic
-            base_url = os.environ.get(
-                "ZAI_BASE_URL",
-                cfg_api.get("zhipu", {}).get("base_url", "https://open.bigmodel.cn/api/paas/v4/"),
-            )
-            model = cfg_api.get("zhipu", {}).get("model", "glm-4-plus")
-            client = anthropic.Anthropic(api_key=zai_key, base_url=base_url)
-            message = client.messages.create(
-                model=model, max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
-        except Exception as e:
-            logger.warning("Z.AI调用失败: %s", e)
-
-    # 2. OpenAI 兼容接口
-    openai_key = os.environ.get("OPENAI_API_KEY", "") or cfg_api.get("openai", {}).get("api_key", "")
-    if openai_key and openai_key != "YOUR_KEY_HERE":
-        try:
-            import anthropic
-            base_url = os.environ.get(
-                "OPENAI_BASE_URL",
-                cfg_api.get("openai", {}).get("base_url", "https://api.openai.com/v1/"),
-            )
-            model = cfg_api.get("openai", {}).get("model", "gpt-4o-mini")
-            client = anthropic.Anthropic(api_key=openai_key, base_url=base_url)
-            message = client.messages.create(
-                model=model, max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
-        except Exception as e:
-            logger.warning("OpenAI调用失败: %s", e)
-
-    # 3. 通过 requests 直接调用（兜底）
-    # 支持任意 OpenAI 兼容接口
-    any_key = os.environ.get("LLM_API_KEY", "")
-    any_url = os.environ.get("LLM_BASE_URL", "")
-    if any_key and any_url:
-        try:
-            import requests
-            model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-            resp = requests.post(
-                f"{any_url}/chat/completions",
-                headers={"Authorization": f"Bearer {any_key}", "Content-Type": "application/json"},
-                json={"model": model, "max_tokens": 1000, "messages": [{"role": "user", "content": prompt}]},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.warning("LLM API调用失败: %s", e)
-
-    logger.warning("LLM未配置API Key，请在以下任一位置配置：")
-    logger.warning("  - 环境变量: ZAI_API_KEY 或 OPENAI_API_KEY")
-    logger.warning("  - 配置文件: config/settings.yaml -> api.zhipu.api_key")
-    return None
+    """默认LLM调用 — 委托给统一LLM客户端"""
+    from src.agent.llm_client import get_client
+    client = get_client()
+    return client.chat(prompt, caller="llm_analysis")
 
 
 def batch_analyze(

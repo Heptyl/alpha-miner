@@ -35,14 +35,14 @@ def main():
     print(f"  运行时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
-    from src.data.trading_calendar import get_latest_trade_date, is_weekend
+    from src.data.trading_calendar import get_latest_trade_date, is_weekend, is_trade_day
     from src.data.storage import Storage
 
     today = now.strftime("%Y-%m-%d")
 
-    # 周末跳过
-    if is_weekend(today):
-        print(f"\n  ⏭ 今天({today})是周末，跳过复盘")
+    # 周末或非交易日跳过（手动指定 --date 时跳过此检查）
+    if not args.date and (is_weekend(today) or not is_trade_day(today)):
+        print(f"\n  ⏭ 今天({today})非交易日，跳过复盘")
         return
 
     # ── Step 1: 找到昨晚的推荐 ──────────────────────────

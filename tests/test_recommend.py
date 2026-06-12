@@ -96,11 +96,11 @@ def populated_db(tmp_db):
     fv_df = pd.DataFrame(fv_df_data)
     tmp_db.insert("factor_values", fv_df, snapshot_time=now)
 
-    # 日K线（为每只股票创建10天数据）
+    # 日K线（为每只股票创建11天数据，包含今天）
     np.random.seed(42)
     price_df_data = []
     for code in ["000001", "000002", "000003", "600001", "600002"]:
-        for i in range(10):
+        for i in range(11):
             d = (now - timedelta(days=10-i)).strftime("%Y-%m-%d")
             price = 10.0 + np.random.randn() * 0.5
             price_df_data.append({
@@ -370,7 +370,7 @@ class TestRecommendEngine:
         text = report.to_text()
         assert len(text) > 0
         assert "每日个股推荐" in text
-        assert "买入区间" in text
+        assert "建议买价" in text or "入场策略" in text
         assert "免责声明" in text
 
 

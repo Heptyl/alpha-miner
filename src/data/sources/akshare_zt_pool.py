@@ -71,7 +71,7 @@ def fetch_zt_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
 def save_zt_pool(df: pd.DataFrame, db: Storage) -> int:
     if df.empty:
         return 0
-    return db.insert("zt_pool", df)
+    return db.insert("zt_pool", df, dedup=True)
 
 
 # ── 炸板池 ──
@@ -102,7 +102,7 @@ def fetch_zb_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
 def save_zb_pool(df: pd.DataFrame, db: Storage) -> int:
     if df.empty:
         return 0
-    return db.insert("zb_pool", df)
+    return db.insert("zb_pool", df, dedup=True)
 
 
 # ── 强势股 ──
@@ -135,4 +135,4 @@ def fetch_strong_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
 def save_strong_pool(df: pd.DataFrame, db: Storage) -> int:
     if df.empty:
         return 0
-    return db.insert("strong_pool", df)
+    return db.insert("strong_pool", df, dedup=True)

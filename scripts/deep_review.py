@@ -142,6 +142,13 @@ def main():
     print(f"  复盘日期: {review_date}")
     print(f"{'='*60}")
 
+    # 非交易日跳过（除非手动指定日期）
+    if not args.date:
+        from src.data.trading_calendar import is_trade_day, is_weekend
+        if is_weekend(review_date) or not is_trade_day(review_date):
+            print(f"  ⏭ 今天({review_date})非交易日，跳过复盘")
+            return
+
     # 找昨日推荐文件
     rec_path = Path("recommendations")
     review_dt = datetime.strptime(review_date, "%Y-%m-%d")

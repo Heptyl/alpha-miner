@@ -34,10 +34,31 @@ def fetch(stock_code: str = "", trade_date: str = "", retries: int = 3) -> pd.Da
     for attempt in range(retries):
         try:
             if stock_code:
-                df = ak.stock_news_em(symbol=stock_code)
+                try:
+                    df = ak.stock_news_em(symbol=stock_code)
+                except (TypeError, ValueError, Exception) as e:
+                    # akshare pyarrow bug: \\u3000正则替换失败
+                    if "Invalid regular expression" in str(e) or "ArrowInvalid" in str(e):
+                        import pandas as pd
+                        # 绕过: 用string backend
+                        with pd.option_context("future.infer_string", False):
+                            df = ak.stock_news_em(symbol=stock_code)
+                    else:
+                        raise
             else:
                 # 无单股票参数时拉全市场热点
-                df = ak.stock_news_em(symbol="")
+                try:
+                    df = ak.stock_news_em(symbol="")
+                except Exception:
+                    # 全市场接口可能失败,用cctv_news兜底
+                    try:
+                        df = ak.news_cctv(date=trade_date.replace("-", "") if trade_date else "")
+                        if df is not None and not df.empty:
+                            df = df.rename(columns={"date": "发布时间", "title": "新闻标题", "content": "新闻内容"})
+                            df["新闻来源"] = "CCTV"
+                            df["新闻链接"] = ""
+                    except Exception:
+                        df = pd.DataFrame()
 
             if df is None or df.empty:
                 return pd.DataFrame()

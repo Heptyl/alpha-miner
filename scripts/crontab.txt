@@ -1,0 +1,32 @@
+# Alpha Miner 自动采集定时任务
+# 安装: crontab /home/ccy/alpha-miner/scripts/crontab.txt
+# 查看: crontab -l
+# 日志: output/logs/
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+PATH=/home/ccy/.local/bin:/home/ccy/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+# ─── 盘中交易守护进程 (周一~周五 9:25启动) ───
+25 9 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_trading_daemon.sh
+
+# ─── 收盘后杀守护进程 (周一~周五 15:10) ───
+10 15 * * 1-5 cd /home/ccy/alpha-miner && PID_FILE=output/trader/daemon_logs/daemon.pid && if [ -f "$PID_FILE" ]; then kill $(cat "$PID_FILE") 2>/dev/null; rm -f "$PID_FILE"; fi
+
+# ─── 收盘流水线 (周一~周五 15:35) ───
+35 15 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_daily.sh
+
+# ─── 早间预热 (周一~周五 08:25) ───
+25 8 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_morning.sh
+
+# ─── 盘中新闻采集 (周一~周五 9:30-14:30 每30分钟) ───
+0,30 9 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_news.sh
+0,30 10 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_news.sh
+0,30 11 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_news.sh
+0,30 13 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_news.sh
+0,30 14 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_news.sh
+
+# ─── 龙虎榜补采+因子重算 (周一~周五 17:30) ───
+# 东财龙虎榜16:30~18:00才发布, 15:35流水线采不到当天lhb
+# 补采lhb后自动重算因子值(lhb_institution)和IC管线
+30 17 * * 1-5 cd /home/ccy/alpha-miner && bash scripts/cron_lhb_recompute.sh

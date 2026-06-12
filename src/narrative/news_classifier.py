@@ -13,6 +13,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "news_classify.md"
+_AUTO_LLM_CLIENT = object()
 
 
 class NewsType(str, Enum):
@@ -80,8 +81,14 @@ class NewsClassifier:
         },
     }
 
-    def __init__(self, llm_client=None):
-        self.llm_client = llm_client
+    def __init__(self, llm_client=_AUTO_LLM_CLIENT):
+        if llm_client is not _AUTO_LLM_CLIENT:
+            self.llm_client = llm_client
+            self._llm_model = "glm-4-plus" if llm_client is not None else ""
+        else:
+            from src.agent.llm_client import get_client
+            c = get_client()
+            self.llm_client, self._llm_model = c.get_anthropic_client()
 
     def classify(self, title: str, content: str = "",
                  stock_code: str = "") -> ClassifyResult:
@@ -164,7 +171,7 @@ class NewsClassifier:
 
         try:
             response = self.llm_client.messages.create(
-                model="glm-4-plus",
+                model=self._llm_model,
                 max_tokens=200,
                 temperature=0.1,
                 messages=[{"role": "user", "content": prompt}],

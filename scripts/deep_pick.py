@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""精选2只最强个股 + LLM深度推理操作建议。
+"""全部推荐股LLM深度推理操作建议（5只全覆盖）。
 
 用法:
   uv run python scripts/deep_pick.py --date 2026-04-29
@@ -20,7 +20,6 @@ sys.path.insert(0, str(project_root))
 def gather_stock_data(codes: list[str], trade_date: str) -> str:
     """收集候选股的全部数据，格式化为LLM可读文本。"""
     conn = sqlite3.connect("data/alpha_miner.db")
-    names = {}
     sections = []
 
     for code in codes:
@@ -127,61 +126,42 @@ def gather_stock_data(codes: list[str], trade_date: str) -> str:
     return "\n".join(sections)
 
 
-def build_llm_prompt(stocks_data: str, trade_date: str, market_info: str) -> str:
-    """构建LLM深度推理的完整prompt。"""
-    next_date = (
-        datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-
-    return f"""你是一位资深A股短线操盘手。请基于以下5只个股的数据，选出逻辑涨势最强的2只，并给出极其详细的次日操作建议。
-
-=== 候选5只（基于{trade_date}收盘数据，适用于{next_date}操作）===
-{stocks_data}
-
-=== 市场环境 ===
-{market_info}
-
-=== 请严格按照以下格式输出 ===
-
-【选出2只】
-编号、代码、名称，以及选择理由（从趋势、量价、资金、题材角度分析）
-
-【第1只操作建议】
-代码 名称
-- 集合竞价（9:15-9:25）：具体挂单价格、什么情况放弃
-- 开盘操作（9:30-10:00）：低开/平开/高开分别怎么操作
-- 盘中买入价位：具体到小数点后2位
-- 放弃信号：什么情况坚决不买
-- 止盈策略：分批止盈价位
-- 止损价位和执行纪律
-
-【第2只操作建议】
-同上格式
-
-请务必结合个股实际K线数据给出精准价位，不要泛泛而谈。"""
+def get_close_prices(codes: list[str], trade_date: str) -> dict[str, float]:
+    """获取每只股票的当日收盘价，用于验证LLM输出。"""
+    conn = sqlite3.connect("data/alpha_miner.db")
+    prices = {}
+    for code in codes:
+        row = conn.execute(
+            "SELECT close FROM daily_price WHERE stock_code=? AND trade_date=?",
+            (code, trade_date),
+        ).fetchone()
+        if row:
+            prices[code] = row[0]
+    conn.close()
+    return prices
 
 
-def format_deep_pick_message(result_text: str, trade_date: str) -> str:
-    """将LLM输出格式化为微信推送消息。"""
-    next_date = (
-        datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%m月%d日")
+PRICING_RULES = """=== 关键定价规则（必须严格遵守）===
+- 所有价位必须基于今日收盘价计算，绝不可以用历史低价
+- 涨停股（10%板）次日竞价范围 = 收盘价 × (0.9 ~ 1.1)
+- 创业板/科创板涨停（20%板）次日竞价范围 = 收盘价 × (0.8 ~ 1.2)
+- 高开 = 开盘价 > 收盘价 × 1.01，低开 = 开盘价 < 收盘价 × 0.99
+- 竞价建议价必须 ≥ 收盘价 × 0.97（涨停股不能建议在前低附近买入）
+- 买入价必须接近收盘价（允许±3%），不能大幅低于收盘价
+- 止损价 ≤ 收盘价 × 0.97"""
 
-    # 清理LLM输出，提取核心内容
-    msg = f"""🎯 Alpha Miner 精选2只 | {next_date}操作指南
-📅 基于{trade_date}收盘数据 | LLM深度推理
-
-{'─' * 30}
-
-{result_text}
-
-{'─' * 30}
-⚠ 以上仅供参考，不构成投资建议"""
-    return msg
+OPERATION_FORMAT = """每只操作建议格式（紧凑，不超过10行）：
+  代码 名称 (收盘价XX.XX)
+  集合竞价：挂单价格、放弃条件（2行，基于收盘价）
+  开盘操作：高开/平开/低开策略（3行）
+  买入价位：2个精确价格（≥ 收盘价×0.97）
+  放弃信号（1行）
+  止盈：2个目标价
+  止损：1个价格（≤ 收盘价×0.97）"""
 
 
 def main():
-    parser = argparse.ArgumentParser(description="精选2只最强个股")
+    parser = argparse.ArgumentParser(description="全部推荐股LLM深度分析")
     parser.add_argument("--date", type=str, default=None, help="日期 YYYY-MM-DD")
     args = parser.parse_args()
 
@@ -194,6 +174,7 @@ def main():
             "SELECT MAX(trade_date) FROM daily_price"
         ).fetchone()
         trade_date = row[0] if row else None
+    conn.close()
 
     if not trade_date:
         print("❌ 无可用数据")
@@ -230,61 +211,66 @@ def main():
     print("收集个股数据...")
     stocks_data = gather_stock_data(codes, trade_date)
 
-    # 构建prompt — 分两段调用避免截断
-    print("LLM深度推理中（第1段：选股+第1只操作建议）...")
+    # 获取收盘价
+    close_prices = get_close_prices(codes, trade_date)
+    price_info = " | ".join([f"{c}={close_prices.get(c, '?') if isinstance(close_prices.get(c), str) else f'{close_prices.get(c, 0):.2f}'}" for c in codes])
+
     from src.strategy.llm_analysis import _default_llm_call
 
     next_date = (
         datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
+    ).strftime("%m月%d日")
 
-    # 第1段：选股 + 第1只详细建议
-    prompt1 = f"""你是一位资深A股短线操盘手。请基于以下5只个股数据，选出逻辑涨势最强的2只。
+    # ── 第1段：全部5只选股逻辑 + 前3只操作建议 ──
+    prompt1 = f"""你是一位资深A股短线操盘手。请为以下5只个股各给出次日操作建议。
 
 === 候选5只（{trade_date}收盘，{next_date}操作）===
 {stocks_data}
 
+=== 今日收盘价 ===
+{price_info}
+
 === 市场环境 ===
 {market_info}
 
-=== 输出要求（严格控制长度，每只不超过15行）===
-1. 选出的2只及简要理由（各2-3行）
-2. 第1只操作建议（紧凑格式）：
-   集合竞价：挂单价格、放弃条件（2行）
-   开盘操作：高开/平开/低开策略（3行）
-   买入价位：2个精确价格（1行）
-   放弃信号（1行）
-   止盈：2个目标价（1行）
-   止损：1个价格（1行）
+{PRICING_RULES}
 
-只输出第1只，第2只下一轮给。不要多余的解释。"""
+=== 输出要求 ===
+1. 5只简要分析（各1-2行，注明今日收盘价，从趋势/量价/资金/题材角度）
+2. 前3只(#1~#3)的详细操作建议：
 
+{OPERATION_FORMAT}
+
+只输出前3只操作建议，后2只下一轮给。不要多余解释。"""
+
+    print("LLM深度推理中（第1段：5只分析 + 前3只操作建议）...")
     result1 = _default_llm_call(prompt1)
     if not result1:
         print("❌ LLM分析第1段失败")
         return
     print(f"✅ 第1段完成 ({len(result1)} 字)")
 
-    prompt2 = f"""上一轮你选出了2只最强个股。现在给出第2只操作建议。
+    # ── 第2段：后2只操作建议 + 操作纪律 ──
+    prompt2 = f"""上一轮你分析了5只个股并给出了前3只的操作建议。现在给出后2只的操作建议。
 
-上一轮输出：
+上一轮输出（前3只）：
 {result1}
 
 数据回顾（{trade_date}收盘）：
+今日收盘价: {price_info}
+
 {stocks_data}
 
-=== 输出要求（严格控制长度，不超过20行）===
-第2只操作建议（紧凑格式）：
-   集合竞价：挂单价格、放弃条件（2行）
-   开盘操作：高开/平开/低开策略（3行）
-   买入价位：2个精确价格（1行）
-   放弃信号（1行）
-   止盈：2个目标价（1行）
-   止损：1个价格（1行）
+{PRICING_RULES}
 
-最后3条操作纪律（3行）。不要多余解释。"""
+=== 输出要求（不超过25行）===
+后2只(#4~#5)的详细操作建议：
 
-    print("LLM深度推理中（第2段：第2只操作建议）...")
+{OPERATION_FORMAT}
+
+最后附上3条操作纪律。不要多余解释。"""
+
+    print("LLM深度推理中（第2段：后2只操作建议）...")
     result2 = _default_llm_call(prompt2)
     if not result2:
         print("❌ LLM分析第2段失败，仅使用第1段结果")
@@ -293,7 +279,15 @@ def main():
         result = result1 + "\n\n" + result2
 
     # 格式化推送消息
-    msg = format_deep_pick_message(result, trade_date)
+    msg = f"""🎯 Alpha Miner 全部5只 | {next_date}操作指南
+📅 基于{trade_date}收盘数据 | LLM深度推理
+
+{'─' * 30}
+
+{result}
+
+{'─' * 30}
+⚠ 以上仅供参考，不构成投资建议"""
 
     # 保存
     Path("recommendations").mkdir(exist_ok=True)

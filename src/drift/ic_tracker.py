@@ -73,12 +73,18 @@ class ICTracker:
         if future.empty:
             return pd.Series(dtype=float)
 
+        # Deduplicate: keep last entry per stock_code (guards against residual dupes)
+        current = current.drop_duplicates(subset="stock_code", keep="last")
+        future = future.drop_duplicates(subset="stock_code", keep="last")
+
         current_prices = current.set_index("stock_code")["close"]
         future_prices = future.set_index("stock_code")["close"]
 
         common = current_prices.index.intersection(future_prices.index)
-        valid = current_prices[common] > 0
-        common = common[valid]
+        # Filter out zero/negative prices to avoid division errors
+        common_prices = current_prices.reindex(common)
+        valid_mask = common_prices > 0
+        common = common[valid_mask.values]
 
         returns = (future_prices[common] - current_prices[common]) / current_prices[common]
         return returns
@@ -95,7 +101,13 @@ class ICTracker:
         fr = fr[mask]
         if len(fv) < 5:
             return np.nan
-        corr, _ = scipy_stats.spearmanr(fv, fr)
+        # 常量输入保护：因子值或收益率全相同时 spearmanr 无意义
+        if fv.std() < 1e-12 or fr.std() < 1e-12:
+            return np.nan
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "An input array is constant")
+            corr, _ = scipy_stats.spearmanr(fv, fr)
         return float(corr) if not np.isnan(corr) else np.nan
 
     def compute_ic_series(

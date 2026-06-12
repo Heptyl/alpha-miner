@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--brief", action="store_true", help="盘后决策简报模式（温度计+候选卡+持仓预警）")
     parser.add_argument("--holdings", type=str, default=None, help="持仓代码，逗号分隔（如 600xxx,000xxx）")
     parser.add_argument("--top", type=int, default=10, help="候选卡片数量（默认10）")
+    parser.add_argument("--push", action="store_true", help="推送简报到微信")
     args = parser.parse_args()
 
     if args.date:
@@ -58,6 +59,17 @@ def main():
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         Path(save_path).write_text(text, encoding="utf-8")
         print(f"\n[INFO] 简报已保存: {save_path}")
+
+        # 微信推送
+        if args.push:
+            from src.drift.push import format_daily_brief_for_wechat, push_message_sync
+
+            wechat_msg = format_daily_brief_for_wechat(args.db, date=report_date)
+            result = push_message_sync(wechat_msg)
+            if result.get("success"):
+                print(f"[INFO] 微信推送成功")
+            else:
+                print(f"[WARN] 微信推送失败: {result.get('error', '未知错误')}")
     else:
         # 传统日报模式
         from src.drift.daily_report import DailyReport

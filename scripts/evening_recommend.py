@@ -56,13 +56,14 @@ def main():
     from src.data.trading_calendar import (
         get_latest_trade_date,
         is_weekend,
+        is_trade_day,
     )
 
     today = args.date or now.strftime("%Y-%m-%d")
 
-    # 周末直接跳过
-    if is_weekend(today):
-        print(f"  ⏭ 今天({today})是周末，跳过")
+    # 非交易日直接跳过
+    if is_weekend(today) or not is_trade_day(today):
+        print(f"  ⏭ 今天({today})非交易日，跳过")
         return
 
     # ── 时间边界：只用已收盘日期的数据 ──

@@ -1,16 +1,53 @@
 __pycache__/
 *.pyc
 .venv/
+venv/
 .pytest_cache/
 *.egg-info/
 /data/
 *.egg
 uv.lock
+.env
+.env.*
+!.env.example
 # reports/  # 调试阶段暂提交，正式运行后排除
 
 reports/
 factors/
 .claude/
+.codex/
+.hermes/
+.archive/
+TradingAgents/
 recommendations/
 config/settings.yaml
 *.db
+
+# === 敏感文件(交易策略/持仓/API key) ===
+config/portfolio.json
+config/trader.json
+output/
+*.pid
+*_api_key*
+
+# 本地诊断和临时文件
+/--db-path
+/check_*.py
+/tmp_*.py
+/fetch_news.py
+/get_schemas.py
+/scripts/check_notifications.py
+/scripts/fetch_us_markets.py
+/scripts/get_detail.py
+/scripts/parse_news*.py
+/scripts/push_notifications.py
+/scripts/query_full_state.py
+/scripts/query_positions.py
+
+# 含个人历史持仓判断，仅保留在本机
+/docs/research_2026_05_10.md
+
+# 外部论文和代理任务书不进入项目源码快照
+/docs/*.pdf
+/docs/claude_*_task_*.md
+/docs/hermes_*_task_*.md

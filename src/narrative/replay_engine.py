@@ -51,7 +51,13 @@ class ReplayEngine:
 
     def __init__(self, db: Storage, llm_client=None):
         self.db = db
-        self.llm_client = llm_client
+        if llm_client:
+            self.llm_client = llm_client
+            self._llm_model = "glm-4-plus"
+        else:
+            from src.agent.llm_client import get_client
+            c = get_client()
+            self.llm_client, self._llm_model = c.get_anthropic_client()
         self.script_engine = ScriptEngine(db)
 
     def replay(self, as_of: datetime, target_date: str = "") -> ReplayResult:
@@ -207,7 +213,7 @@ class ReplayEngine:
 
         try:
             response = self.llm_client.messages.create(
-                model="glm-4-plus",
+                model=self._llm_model,
                 max_tokens=1000,
                 temperature=0.3,
                 messages=[{"role": "user", "content": prompt}],

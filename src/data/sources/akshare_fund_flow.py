@@ -8,6 +8,7 @@
 无超大单/大单拆分，但有主力净额（净额即主力净流入）。
 """
 
+import json
 import logging
 import re
 import sys
@@ -207,16 +208,109 @@ def _parse_table(table, trade_date: str) -> list[dict]:
 def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
     """拉取资金流向。
 
-    主源: 同花顺全市场排名（~2min 拉完）
+    数据源优先级：
+    1. 同花顺全市场排名（~2min 拉完，最全）
+    2. 新浪全市场资金流排名（快速，~5000只）
+    3. 东财逐只（只拉重点股票，WAF严重时降级）
     """
     # 主源：同花顺
     result = _fetch_ths_rank(trade_date)
     if not result.empty:
         return result
 
-    # 回退：东财逐只（可能被 WAF）
-    logger.warning("fund_flow: 同花顺失败，回退东财逐只")
+    # 备选1：新浪
+    logger.warning("fund_flow: 同花顺失败，回退新浪")
+    result = _fetch_sina_rank(trade_date)
+    if not result.empty:
+        return result
+
+    # 备选2：东财逐只（可能被 WAF）
+    logger.warning("fund_flow: 新浪也失败，回退东财逐只")
     return _fetch_em_fallback(trade_date)
+
+
+def _fetch_sina_rank(trade_date: str) -> pd.DataFrame:
+    """从新浪拉全市场个股资金流排名。
+
+    接口: vip.stock.finance.sina.com.cn MoneyFlow.ssl_bkzj_ssggzj
+    逐页拉取，每页50只，全市场约5000只（~100页）。
+    注意：只返回当天数据，不能指定历史日期。
+    """
+    _SINA_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_ssggzj"
+    _SINA_PAGE_SIZE = 80
+    _SINA_DELAY = 0.5  # 每页间隔
+
+    all_rows = []
+    page = 1
+
+    while True:
+        try:
+            r = requests.get(
+                _SINA_URL,
+                params={
+                    "page": page,
+                    "num": _SINA_PAGE_SIZE,
+                    "sort": "netamount",
+                    "asc": 0,
+                    "nodeId": "hs_a",
+                },
+                timeout=15,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if r.status_code != 200 or not r.text.strip():
+                logger.warning("fund_flow sina 第%d页 HTTP %d 或空响应", page, r.status_code)
+                break
+
+            data = json.loads(r.text)
+            if not isinstance(data, list) or not data:
+                logger.info("fund_flow sina 第%d页无数据，停止", page)
+                break
+
+            for d in data:
+                symbol = d.get("symbol", "")
+                # sh600519 -> 600519, sz000001 -> 000001
+                stock_code = symbol[2:] if len(symbol) > 2 else symbol
+                if not stock_code or not stock_code.isdigit():
+                    continue
+                try:
+                    all_rows.append({
+                        "stock_code": stock_code,
+                        "trade_date": trade_date,
+                        "stock_name": d.get("name", ""),
+                        "pct_change": float(d.get("changeratio", 0)) * 100,
+                        "turnover_rate": float(d.get("turnover", 0)),
+                        "inflow": float(d.get("inamount", 0)),
+                        "outflow": float(d.get("outamount", 0)),
+                        "net_amount": float(d.get("netamount", 0)),
+                        "amount": float(d.get("amount", 0)),
+                        "main_net": float(d.get("r0_net", 0)),  # 主力净流入
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+            if page % 10 == 0:
+                logger.info("fund_flow sina 进度: 第%d页, 累计 %d 只", page, len(all_rows))
+
+            # 不足一页说明到头了
+            if len(data) < _SINA_PAGE_SIZE:
+                break
+
+            page += 1
+            time.sleep(_SINA_DELAY)
+
+        except Exception as e:
+            logger.warning("fund_flow sina 第%d页失败: %s", page, e)
+            # 重试逻辑：前3页失败直接退出，后面的跳过继续
+            if page <= 3:
+                break
+            page += 1
+            time.sleep(3)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    logger.info("fund_flow sina 完成: 共 %d 只", len(all_rows))
+    return pd.DataFrame(all_rows)
 
 
 def _fetch_em_fallback(trade_date: str) -> pd.DataFrame:

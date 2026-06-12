@@ -88,4 +88,26 @@ def save(df: pd.DataFrame, db: Storage) -> int:
         dates = df["trade_date"].unique()
         for d in dates:
             db.execute_write("DELETE FROM lhb_detail WHERE trade_date = ?", (d,))
-    return db.insert("lhb_detail", df)
+    # 用replace模式避免UNIQUE冲突
+    try:
+        return db.insert("lhb_detail", df, dedup=True)
+    except Exception:
+        # 如果仍有冲突，逐行插入
+        import sqlite3
+        conn = sqlite3.connect(db.db_path)
+        cnt = 0
+        for _, row in df.iterrows():
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO lhb_detail (stock_code, trade_date, buy_amount, sell_amount, net_amount, reason, buy_depart, sell_depart) VALUES (?,?,?,?,?,?,?,?)",
+                    (row.get("stock_code"), row.get("trade_date"),
+                     row.get("buy_amount", 0), row.get("sell_amount", 0),
+                     row.get("net_amount", 0), row.get("reason", ""),
+                     row.get("buy_depart", ""), row.get("sell_depart", "")),
+                )
+                cnt += 1
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        return cnt

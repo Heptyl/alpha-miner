@@ -1,102 +1,56 @@
-"""盘后复盘模块 — 对比昨日推荐 vs 实际走势。
+"""盘后复盘模块 — 对比前一日推荐与当日实际走势。
 
-每日收盘后运行（建议15:30后），对比：
-1. 昨日推荐的5只个股今日实际表现
-2. 是否触及买入区间
-3. 是否达到目标价
-4. 是否触发止损
-5. 汇总命中率和盈亏
-
-输出：
-- 复盘报告（文本 + JSON）
-- 累计统计数据
+读取前一交易日的推荐报告，用当日行情验证：
+  - 是否触及买点
+  - 是否触及目标价
+  - 是否触及止损
+  - 实际盈亏
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
-
-logger = logging.getLogger(__name__)
+from typing import List, Optional
 
 
 @dataclass
-class StockReview:
+class ReviewStock:
     """单只推荐股的复盘结果。"""
-
     stock_code: str
     stock_name: str
     signal_level: str
-
-    # 昨日推荐参数
     rec_buy_price: float
-    rec_buy_zone_low: float
-    rec_buy_zone_high: float
     rec_target: float
     rec_stop_loss: float
-    rec_close: float  # 推荐时的收盘价（前一日）
-
-    # 今日实际走势
+    rec_close: float = 0.0
     today_open: float = 0.0
     today_high: float = 0.0
     today_low: float = 0.0
     today_close: float = 0.0
-    today_change_pct: float = 0.0  # 涨跌幅%
-
-    # 命中判定
-    hit_buy_zone: bool = False       # 最低价是否触及买入区间
-    hit_target: bool = False         # 最高价是否达到目标价
-    hit_stop_loss: bool = False      # 最低价是否跌破止损价
-
-    # 模拟盈亏（假设在买入区间中位买入）
+    today_change_pct: float = 0.0
+    hit_buy_zone: bool = False
+    hit_target: bool = False
+    hit_stop_loss: bool = False
     entry_price: float = 0.0
-    profit_pct: float = 0.0         # 相对买入价盈亏%
-    profit_vs_target: float = 0.0   # 距目标价多少%
-
-    def to_dict(self) -> dict:
-        return {
-            "stock_code": self.stock_code,
-            "stock_name": self.stock_name,
-            "signal_level": self.signal_level,
-            "rec_buy_price": self.rec_buy_price,
-            "rec_target": self.rec_target,
-            "rec_stop_loss": self.rec_stop_loss,
-            "rec_close": self.rec_close,
-            "today_open": self.today_open,
-            "today_high": self.today_high,
-            "today_low": self.today_low,
-            "today_close": self.today_close,
-            "today_change_pct": round(self.today_change_pct, 2),
-            "hit_buy_zone": self.hit_buy_zone,
-            "hit_target": self.hit_target,
-            "hit_stop_loss": self.hit_stop_loss,
-            "entry_price": self.entry_price,
-            "profit_pct": round(self.profit_pct, 2),
-        }
+    profit_pct: float = 0.0
 
 
 @dataclass
-class DailyReview:
-    """每日复盘报告。"""
-
-    review_date: str          # 复盘日期（今日）
-    rec_date: str             # 推荐基于的日期（昨日）
-    stocks: list[StockReview] = field(default_factory=list)
-
-    # 汇总
+class ReviewResult:
+    """复盘结果汇总。"""
+    review_date: str
+    rec_date: str
     total: int = 0
-    hit_buy_count: int = 0    # 触及买入区间数
-    hit_target_count: int = 0 # 达到目标价数
-    hit_stop_count: int = 0   # 触发止损数
+    hit_buy_count: int = 0
+    hit_target_count: int = 0
+    hit_stop_count: int = 0
     avg_profit_pct: float = 0.0
-    win_rate: float = 0.0     # 盈利比例
+    win_rate: float = 0.0
+    stocks: List[ReviewStock] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -107,239 +61,213 @@ class DailyReview:
             "hit_target_count": self.hit_target_count,
             "hit_stop_count": self.hit_stop_count,
             "avg_profit_pct": round(self.avg_profit_pct, 2),
-            "win_rate": round(self.win_rate, 2),
-            "stocks": [s.to_dict() for s in self.stocks],
+            "win_rate": round(self.win_rate, 1),
+            "stocks": [
+                {
+                    "stock_code": s.stock_code,
+                    "stock_name": s.stock_name,
+                    "signal_level": s.signal_level,
+                    "rec_buy_price": round(s.rec_buy_price, 2),
+                    "rec_target": round(s.rec_target, 2),
+                    "rec_stop_loss": round(s.rec_stop_loss, 2),
+                    "rec_close": round(s.rec_close, 2),
+                    "today_open": round(s.today_open, 2),
+                    "today_high": round(s.today_high, 2),
+                    "today_low": round(s.today_low, 2),
+                    "today_close": round(s.today_close, 2),
+                    "today_change_pct": round(s.today_change_pct, 2),
+                    "hit_buy_zone": s.hit_buy_zone,
+                    "hit_target": s.hit_target,
+                    "hit_stop_loss": s.hit_stop_loss,
+                    "entry_price": round(s.entry_price, 2),
+                    "profit_pct": round(s.profit_pct, 2),
+                }
+                for s in self.stocks
+            ],
         }
 
-    def to_text(self) -> str:
-        lines = []
-        lines.append("=" * 60)
-        lines.append(f"  Alpha Miner 盘后复盘 — {self.review_date}")
-        lines.append(f"  回顾 {self.rec_date} 的推荐")
-        lines.append("=" * 60)
 
-        if not self.stocks:
-            lines.append("\n  无推荐记录")
-        else:
-            lines.append(f"\n  总推荐: {self.total} 只")
-            lines.append(f"  触及买点: {self.hit_buy_count}/{self.total}")
-            lines.append(f"  达到目标: {self.hit_target_count}/{self.total}")
-            lines.append(f"  触发止损: {self.hit_stop_count}/{self.total}")
-            lines.append(f"  平均盈亏: {self.avg_profit_pct:+.2f}%")
-            lines.append(f"  盈利比例: {self.win_rate:.0f}%")
+def _find_prev_trading_day(date_str: str, db_path: str) -> Optional[str]:
+    """查找前一个有推荐的交易日。"""
+    # 在 recommendations 目录中查找前一个推荐文件
+    rec_dir = Path("recommendations")
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
 
-            lines.append(f"\n  {'─'*56}")
-            for i, s in enumerate(self.stocks, 1):
-                # 状态标记
-                if s.hit_target:
-                    status = "🎯命中目标"
-                elif s.hit_stop_loss:
-                    status = "🛑触发止损"
-                elif s.profit_pct > 0:
-                    status = f"📈+{s.profit_pct:.1f}%"
-                else:
-                    status = f"📉{s.profit_pct:.1f}%"
-
-                buy_hit = "✅" if s.hit_buy_zone else "❌"
-
-                lines.append(f"\n  {i}. [{s.signal_level}] {s.stock_code} {s.stock_name} {status}")
-                lines.append(f"     推荐: 买{s.rec_buy_price:.2f} 目标{s.rec_target:.2f} 止损{s.rec_stop_loss:.2f}")
-                lines.append(f"     今日: 开{s.today_open:.2f} 高{s.today_high:.2f} 低{s.today_low:.2f} 收{s.today_close:.2f} ({s.today_change_pct:+.1f}%)")
-                lines.append(f"     触及买点: {buy_hit} | 模拟盈亏: {s.profit_pct:+.2f}%")
-
-        lines.append(f"\n  ⚠ 复盘基于收盘价对比，仅供参考")
-        lines.append("=" * 60)
-        return "\n".join(lines)
+    for _ in range(10):  # 最多回溯10天
+        dt -= timedelta(days=1)
+        d = dt.strftime("%Y-%m-%d")
+        # 检查多种推荐文件格式
+        for pattern in [f"{d}_recommend.json", f"{d}_recommend_v2.json", f"{d}.txt"]:
+            if (rec_dir / pattern).exists():
+                return d
+    return None
 
 
-def run_review(
-    review_date: str,
-    db_path: str = "data/alpha_miner.db",
-    rec_dir: str = "recommendations",
-) -> Optional[DailyReview]:
-    """运行盘后复盘。
+def _load_recommendations(rec_date: str) -> List[dict]:
+    """加载指定日期的推荐报告。"""
+    rec_dir = Path("recommendations")
 
-    Args:
-        review_date: 复盘日期 YYYY-MM-DD（今日）
-        db_path: 数据库路径
-        rec_dir: 推荐文件目录
+    # 优先 v2 json
+    v2_path = rec_dir / f"{rec_date}_recommend_v2.json"
+    if v2_path.exists():
+        data = json.loads(v2_path.read_text(encoding="utf-8"))
+        return _extract_stocks_from_json(data)
 
-    Returns:
-        DailyReview 或 None（无推荐记录时）
+    # 普通 json
+    json_path = rec_dir / f"{rec_date}_recommend.json"
+    if json_path.exists():
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        return _extract_stocks_from_json(data)
+
+    # 纯文本（无法解析）
+    return []
+
+
+def _extract_stocks_from_json(data: dict) -> List[dict]:
+    """从推荐 JSON 中提取股票列表。"""
+    if "stocks" in data:
+        stocks = data["stocks"]
+        if stocks and isinstance(stocks[0], dict):
+            return stocks
+    if "recommendations" in data:
+        return data["recommendations"]
+    return []
+
+
+def _get_today_price(stock_code: str, review_date: str, db_path: str) -> dict:
+    """从数据库获取当日行情。"""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT open, high, low, close, pct_chg "
+            "FROM daily_price WHERE code = ? AND date = ?",
+            (stock_code, review_date),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return {
+                "open": row["open"] or 0.0,
+                "high": row["high"] or 0.0,
+                "low": row["low"] or 0.0,
+                "close": row["close"] or 0.0,
+                "pct_chg": row["pct_chg"] or 0.0,
+            }
+    except Exception:
+        pass
+    return {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "pct_chg": 0.0}
+
+
+def run_review(report_date: str, db_path: str = "data/alpha_miner.db") -> Optional[ReviewResult]:
+    """执行复盘：对比推荐日和复盘日的行情。
+
+    report_date: 复盘日期（今天）
+    返回: ReviewResult 或 None（无前一日推荐）
     """
-    # 确定推荐日期 = review_date 的前一个交易日
-    # 从推荐文件名中找
-    rec_path = Path(rec_dir)
-
-    # review_date 是今日，推荐基于昨日数据
-    # 尝试找 review_date-1 或 review_date-2 的推荐文件
-    # 因为推荐文件名是 推荐日期_recommend.json
-    review_dt = datetime.strptime(review_date, "%Y-%m-%d")
-
-    rec_json = None
-    rec_date = None
-    for delta in range(1, 5):
-        candidate = review_dt - timedelta(days=delta)
-        candidate_str = candidate.strftime("%Y-%m-%d")
-        f = rec_path / f"{candidate_str}_recommend.json"
-        if f.exists():
-            rec_json = f
-            rec_date = candidate_str
-            break
-
-    if rec_json is None:
-        logger.warning("找不到 %s 之前的推荐文件", review_date)
+    # 查找前一个推荐日
+    rec_date = _find_prev_trading_day(report_date, db_path)
+    if not rec_date:
         return None
 
     # 加载推荐
-    with open(rec_json, "r", encoding="utf-8") as f:
-        rec_data = json.load(f)
-
-    rec_stocks = rec_data.get("stocks", [])
+    rec_stocks = _load_recommendations(rec_date)
     if not rec_stocks:
-        logger.warning("%s 推荐列表为空", rec_date)
         return None
 
-    # 从数据库加载今日实际走势
-    conn = sqlite3.connect(db_path)
+    result = ReviewResult(
+        review_date=report_date,
+        rec_date=rec_date,
+    )
 
-    reviews = []
     for s in rec_stocks:
-        code = s["stock_code"]
-        # 今日K线
-        row = conn.execute(
-            "SELECT open, high, low, close FROM daily_price "
-            "WHERE trade_date = ? AND stock_code = ?",
-            (review_date, code),
-        ).fetchone()
+        code = s.get("code") or s.get("stock_code", "")
+        name = s.get("name") or s.get("stock_name", "")
+        level = s.get("signal_level", "C")
+        buy_price = float(s.get("buy_price") or s.get("rec_buy_price") or 0)
+        target = float(s.get("target_price") or s.get("rec_target") or 0)
+        stop_loss = float(s.get("stop_loss") or s.get("rec_stop_loss") or 0)
+        rec_close = float(s.get("close") or s.get("rec_close") or 0)
 
-        if row is None:
-            # 今日数据还没入库
-            logger.warning("%s 无 %s K线数据，跳过", code, review_date)
-            continue
+        # 获取当日行情
+        price = _get_today_price(code, report_date, db_path)
 
-        today_open, today_high, today_low, today_close = row
+        # 判断触及情况
+        hit_buy = False
+        hit_target = False
+        hit_stop = False
+        entry_price = 0.0
+        profit_pct = 0.0
 
-        # 昨日收盘（推荐时的收盘价）
-        prev_row = conn.execute(
-            "SELECT close FROM daily_price "
-            "WHERE trade_date = ? AND stock_code = ?",
-            (rec_date, code),
-        ).fetchone()
-        prev_close = prev_row[0] if prev_row else s.get("technical", {}).get("current_price", 0)
+        if buy_price > 0 and price["low"] > 0:
+            # 触及买点：最低价 <= 推荐买价 * 1.02（略高2%也算触及）
+            hit_buy = price["low"] <= buy_price * 1.02
+            if hit_buy:
+                entry_price = min(price["open"], buy_price * 1.01)
 
-        # 涨跌幅
-        change_pct = ((today_close - prev_close) / prev_close * 100) if prev_close > 0 else 0
+            # 触及目标
+            if target > 0:
+                hit_target = price["high"] >= target
 
-        # 推荐参数
-        rec_buy = s.get("buy_price", 0)
-        rec_buy_low = s.get("buy_zone_low", 0)
-        rec_buy_high = s.get("buy_zone_high", 0)
-        rec_target = s.get("target_price", 0)
-        rec_stop = s.get("stop_loss", 0)
+            # 触及止损
+            if stop_loss > 0:
+                hit_stop = price["low"] <= stop_loss
 
-        # 命中判定
-        hit_buy = today_low <= rec_buy_high and today_high >= rec_buy_low
-        hit_target = today_high >= rec_target if rec_target > 0 else False
-        hit_stop = today_low <= rec_stop if rec_stop > 0 else False
+            # 计算盈亏
+            if entry_price > 0 and price["close"] > 0:
+                profit_pct = (price["close"] / entry_price - 1) * 100
 
-        # 模拟买入价 = 买入区间中位，如果触及买入区间
-        if hit_buy:
-            # 假设在区间中位买入
-            entry = (rec_buy_low + rec_buy_high) / 2
-        else:
-            # 没触及买点，按昨日收盘算浮盈浮亏（实际不会买入）
-            entry = prev_close
-
-        profit_pct = ((today_close - entry) / entry * 100) if entry > 0 else 0
-
-        sr = StockReview(
+        rs = ReviewStock(
             stock_code=code,
-            stock_name=s.get("stock_name", ""),
-            signal_level=s.get("signal_level", ""),
-            rec_buy_price=rec_buy,
-            rec_buy_zone_low=rec_buy_low,
-            rec_buy_zone_high=rec_buy_high,
-            rec_target=rec_target,
-            rec_stop_loss=rec_stop,
-            rec_close=prev_close,
-            today_open=today_open,
-            today_high=today_high,
-            today_low=today_low,
-            today_close=today_close,
-            today_change_pct=change_pct,
+            stock_name=name,
+            signal_level=level,
+            rec_buy_price=buy_price,
+            rec_target=target,
+            rec_stop_loss=stop_loss,
+            rec_close=rec_close,
+            today_open=price["open"],
+            today_high=price["high"],
+            today_low=price["low"],
+            today_close=price["close"],
+            today_change_pct=price["pct_chg"],
             hit_buy_zone=hit_buy,
             hit_target=hit_target,
             hit_stop_loss=hit_stop,
-            entry_price=round(entry, 2),
-            profit_pct=round(profit_pct, 2),
+            entry_price=entry_price,
+            profit_pct=profit_pct,
         )
-        reviews.append(sr)
+        result.stocks.append(rs)
 
-    conn.close()
+    # 汇总统计
+    result.total = len(result.stocks)
+    result.hit_buy_count = sum(1 for s in result.stocks if s.hit_buy_zone)
+    result.hit_target_count = sum(1 for s in result.stocks if s.hit_target)
+    result.hit_stop_count = sum(1 for s in result.stocks if s.hit_stop_loss)
 
-    if not reviews:
-        return None
-
-    # 汇总
-    total = len(reviews)
-    hit_buy_count = sum(1 for r in reviews if r.hit_buy_zone)
-    hit_target_count = sum(1 for r in reviews if r.hit_target)
-    hit_stop_count = sum(1 for r in reviews if r.hit_stop_loss)
-    profits = [r.profit_pct for r in reviews if r.hit_buy_zone]
-    avg_profit = float(np.mean(profits)) if profits else 0.0
-    # 只统计触及买点的胜率
-    wins = sum(1 for p in profits if p > 0)
-    win_rate = (wins / len(profits) * 100) if profits else 0.0
-
-    result = DailyReview(
-        review_date=review_date,
-        rec_date=rec_date,
-        stocks=reviews,
-        total=total,
-        hit_buy_count=hit_buy_count,
-        hit_target_count=hit_target_count,
-        hit_stop_count=hit_stop_count,
-        avg_profit_pct=round(avg_profit, 2),
-        win_rate=round(win_rate, 1),
-    )
+    if result.stocks:
+        result.avg_profit_pct = sum(s.profit_pct for s in result.stocks) / len(result.stocks)
+        wins = sum(1 for s in result.stocks if s.profit_pct > 0)
+        result.win_rate = wins / len(result.stocks) * 100
 
     return result
 
 
-def format_review_wechat(review: DailyReview) -> str:
-    """格式化复盘微信消息。"""
-    lines = []
-    lines.append("📊 Alpha Miner 盘后复盘")
-    lines.append(f"📅 {review.review_date} | 回顾 {review.rec_date} 推荐")
-    lines.append("")
-
-    lines.append(f"📈 汇总: {review.total}只推荐")
-    lines.append(f"  触及买点: {review.hit_buy_count}/{review.total}")
-    lines.append(f"  命中目标: {review.hit_target_count}/{review.total}")
-    lines.append(f"  触发止损: {review.hit_stop_count}/{review.total}")
-    if review.hit_buy_count > 0:
-        lines.append(f"  平均盈亏: {review.avg_profit_pct:+.2f}%")
-        lines.append(f"  胜率: {review.win_rate:.0f}%")
-    lines.append("")
-
+def format_review_wechat(review: ReviewResult) -> str:
+    """格式化微信推送消息。"""
+    lines = [
+        f"📊 【复盘 {review.rec_date}→{review.review_date}】",
+        f"推荐 {review.total} 只 | "
+        f"触及买点 {review.hit_buy_count}/{review.total} | "
+        f"胜率 {review.win_rate:.0f}% | "
+        f"均盈 {review.avg_profit_pct:+.2f}%",
+        "",
+    ]
     for i, s in enumerate(review.stocks, 1):
-        if s.hit_target:
-            status = "🎯达标"
-        elif s.hit_stop_loss:
-            status = "🛑止损"
-        elif s.profit_pct > 0:
-            status = f"📈+{s.profit_pct:.1f}%"
-        else:
-            status = f"📉{s.profit_pct:.1f}%"
-
+        icon = "🟢" if s.profit_pct > 0 else "🔴" if s.profit_pct < 0 else "⚪"
         buy_icon = "✅" if s.hit_buy_zone else "❌"
         lines.append(
-            f"{i}. {status} {s.stock_code} {s.stock_name}\n"
-            f"   收{s.today_close:.2f}({s.today_change_pct:+.1f}%) "
-            f"买点{buy_icon} 盈亏{s.profit_pct:+.1f}%"
+            f"{i}. {icon} {s.stock_name}({s.stock_code}) "
+            f"{s.profit_pct:+.1f}% "
+            f"买{buy_icon} 收{s.today_close:.2f}"
         )
-
-    lines.append("")
-    lines.append("⚠ 仅供参考")
     return "\n".join(lines)

@@ -62,6 +62,48 @@ def is_weekend(date_str: str) -> bool:
     return dt.weekday() >= 5  # 5=周六, 6=周日
 
 
+def is_trade_day(date_str: str, db_path: str = "data/alpha_miner.db") -> bool:
+    """判断是否交易日（综合周末+数据库验证）。
+    
+    逻辑：
+    1. 周末直接返回 False
+    2. 数据库有该日数据且行数 >= 100 → True（确认的交易日）
+    3. 数据库无该日数据但该日是今天且为工作日 → True（可能尚未采集）
+    4. 过去的工作日无数据 → False（可能是法定节假日）
+    5. 未来日期：假设工作日=交易日
+    """
+    if is_weekend(date_str):
+        return False
+    
+    import sqlite3
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM daily_price WHERE trade_date = ?",
+                (date_str,),
+            ).fetchone()
+            count = row[0] if row else 0
+            if count >= 100:
+                return True  # 数据库有完整数据，确认是交易日
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    
+    # 数据库没有该日数据
+    if date_str == today:
+        return True  # 今天还没采集数据是正常的，工作日即视为交易日
+    
+    if date_str < today:
+        return False  # 过去的工作日没有数据，大概率是法定节假日
+    
+    # 未来日期或数据库异常：假设工作日=交易日
+    return True
+
+
 def get_previous_trade_date(
     date_str: str,
     trade_dates: list[str] | None = None,

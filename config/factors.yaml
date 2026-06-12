@@ -1,4 +1,21 @@
-# 因子注册表
+# 因子注册表 — 2026-05-11 回测验证后更新
+# 验收标准: IC>0.03, ICIR>0.5, IC胜率>55%, 多空>0.3%
+#
+# 评级:
+#   A+ lhb_institution   IC=0.14 ICIR=1.46 胜率88% 多空+1.58%
+#   A  consecutive_board  IC=0.09 ICIR=0.66 胜率77% 多空+0.76%
+#   B  theme_lifecycle    IC=0.11 ICIR=1.82 胜率100% 多空+1.16% (样本少)
+#   B  theme_crowding     IC=nan  ICIR=N/A  胜率71% 多空+0.61%  → DISABLED
+#   C  turnover_rank      IC=0.03 ICIR=0.20 胜率54% 多空+0.62% (ICIR不达标) → DISABLED
+#   S  zt_dt_ratio        市场级因子，不分个股，单独使用 → DISABLED
+#
+# 已淘汰 (disabled):
+#   F  main_flow_intensity  IC=nan 胜率52% 多空-0.81% (反向)
+#   F  narrative_velocity   IC=nan 胜率33% 多空-0.59% (完全无效)
+#   D  leader_clarity       IC=0.01 ICIR=0.25 胜率50% 多空+0.27% (IC<0.03)
+#   C  turnover_rank        IC=0.03 ICIR=0.20 胜率54% 多空+0.62% (ICIR不达标)
+#   B  theme_crowding       IC=nan  ICIR=N/A  胜率71% 多空+0.61%
+#   S  zt_dt_ratio          市场级因子，不分个股，单独使用
 
 formula_factors:
   - name: zt_dt_ratio
@@ -7,18 +24,12 @@ formula_factors:
     description: "涨停/(涨停+跌停) — 市场级情绪因子"
     factor_type: market
     lookback_days: 1
+    disabled: true
 
   - name: consecutive_board
     class: ConsecutiveBoardFactor
     module: src.factors.formula.consecutive_board
     description: "连板数 — 接力情绪指标"
-    factor_type: stock
-    lookback_days: 1
-
-  - name: main_flow_intensity
-    class: MainFlowIntensityFactor
-    module: src.factors.formula.main_flow_intensity
-    description: "主力净流入/成交额 — 大资金参与强度"
     factor_type: stock
     lookback_days: 1
 
@@ -28,11 +39,12 @@ formula_factors:
     description: "换手率百分位排名 — 资金关注度"
     factor_type: stock
     lookback_days: 1
+    disabled: true
 
   - name: lhb_institution
     class: LhbInstitutionFactor
     module: src.factors.formula.lhb_institution
-    description: "龙虎榜机构净买入额 — 专业资金信号"
+    description: "龙虎榜资金活跃度 — 大资金信号"
     factor_type: stock
     lookback_days: 1
 
@@ -40,27 +52,25 @@ narrative_factors:
   - name: theme_lifecycle
     class: ThemeLifecycleFactor
     module: src.factors.narrative.theme_lifecycle
-    description: "题材连续涨停天数→生命周期阶段分数"
+    description: "题材生命周期阶段分数 — 萌芽→爆发→衰退"
     factor_type: stock
     lookback_days: 10
-
-  - name: narrative_velocity
-    class: NarrativeVelocityFactor
-    module: src.factors.narrative.narrative_velocity
-    description: "新闻数量3日变化率"
-    factor_type: stock
-    lookback_days: 5
 
   - name: theme_crowding
     class: ThemeCrowdingFactor
     module: src.factors.narrative.theme_crowding
-    description: "题材涨停占比，拥挤度越高分数越低"
+    description: "题材拥挤度 — 涨停占比越高分数越低（反拥挤）"
     factor_type: stock
     lookback_days: 5
+    disabled: true
 
-  - name: leader_clarity
-    class: LeaderClarityFactor
-    module: src.factors.narrative.leader_clarity
-    description: "龙头成交额/第二名成交额"
-    factor_type: stock
-    lookback_days: 1
+# ============================================================
+# 淘汰因子 (不加载，代码保留但不执行)
+# ============================================================
+# disabled_factors:
+#   - name: main_flow_intensity
+#     reason: "IC=nan, 胜率52%, 多空-0.81% (反向), 回测2026-04-01~05-11"
+#   - name: narrative_velocity
+#     reason: "IC=nan, 胜率33%, 多空-0.59% (完全无效), 回测2026-04-01~05-11"
+#   - name: leader_clarity
+#     reason: "IC=0.0148<0.03, ICIR=0.25, 胜率50%, 多空仅0.27%, 回测2026-04-01~05-11"

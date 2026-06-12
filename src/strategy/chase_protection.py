@@ -46,6 +46,7 @@ def compute_chase_risk(
     trade_date: str,
     lookback_days: int = 5,
     db_path: str = DB_PATH,
+    is_zt_pool: bool = False,
 ) -> Optional[ChaseRisk]:
     """计算追高风险。
 
@@ -108,7 +109,8 @@ def compute_chase_risk(
 
     # 风险评级
     risk_level, penalty, reasons = _assess_risk(
-        total_change, consecutive_up, is_limit_up, lookback_days
+        total_change, consecutive_up, is_limit_up, lookback_days,
+        is_zt_pool=is_zt_pool,
     )
 
     return ChaseRisk(
@@ -129,49 +131,70 @@ def _assess_risk(
     consecutive_up: int,
     is_limit_up: bool,
     lookback: int,
+    is_zt_pool: bool = False,
 ) -> tuple[str, float, list[str]]:
     """评估追高风险。
 
     Returns:
         (risk_level, score_penalty, reasons)
 
-    阈值设计：
-    - 5日涨 0~15%  → low (不惩罚)
-    - 5日涨 15~25% → medium (惩罚30%)
-    - 5日涨 25~40% → high (惩罚60%)
-    - 5日涨 >40%   → extreme (惩罚90%, 几乎排除)
-    - 连续3天以上涨停 → 额外惩罚
+    阈值设计（涨停池股票阈值放宽）:
+    - 普通: 0~15% low / 15~25% medium / 25~40% high / >40% extreme
+    - 涨停池: 0~25% low / 25~40% medium / 40~60% high / >60% extreme
     """
     reasons = []
     penalty = 0.0
 
-    # 基于累计涨幅的惩罚
-    if total_change >= 40:
-        risk = "extreme"
-        penalty = 0.90
-        reasons.append(f"{lookback}日暴涨{total_change:.0f}%，追高风险极大")
-    elif total_change >= 25:
-        risk = "high"
-        penalty = 0.60
-        reasons.append(f"{lookback}日涨{total_change:.0f}%，短期涨幅过大")
-    elif total_change >= 15:
-        risk = "medium"
-        penalty = 0.30
-        reasons.append(f"{lookback}日涨{total_change:.0f}%，需注意回调风险")
+    # 涨停池股票阈值放宽（打板策略本身就是追涨）
+    if is_zt_pool:
+        if total_change >= 60:
+            risk = "extreme"
+            penalty = 0.70
+            reasons.append(f"{lookback}日暴涨{total_change:.0f}%，追高风险极大")
+        elif total_change >= 40:
+            risk = "high"
+            penalty = 0.35
+            reasons.append(f"{lookback}日涨{total_change:.0f}%，高位接力风险")
+        elif total_change >= 25:
+            risk = "medium"
+            penalty = 0.10
+            reasons.append(f"{lookback}日涨{total_change:.0f}%，注意分歧")
+        else:
+            risk = "low"
+            penalty = 0.0
     else:
-        risk = "low"
-        penalty = 0.0
+        # 普通股票严格阈值
+        if total_change >= 40:
+            risk = "extreme"
+            penalty = 0.90
+            reasons.append(f"{lookback}日暴涨{total_change:.0f}%，追高风险极大")
+        elif total_change >= 25:
+            risk = "high"
+            penalty = 0.60
+            reasons.append(f"{lookback}日涨{total_change:.0f}%，短期涨幅过大")
+        elif total_change >= 15:
+            risk = "medium"
+            penalty = 0.30
+            reasons.append(f"{lookback}日涨{total_change:.0f}%，需注意回调风险")
+        else:
+            risk = "low"
+            penalty = 0.0
 
-    # 连涨天数叠加惩罚
-    if consecutive_up >= 4:
-        penalty = min(penalty + 0.30, 0.95)
-        reasons.append(f"连涨{consecutive_up}天，获利盘压力大")
-    elif consecutive_up >= 3:
-        penalty = min(penalty + 0.15, 0.90)
-        reasons.append(f"连涨{consecutive_up}天")
+    # 连涨天数叠加（涨停池放宽）
+    if is_zt_pool:
+        if consecutive_up >= 5:
+            penalty = min(penalty + 0.20, 0.90)
+            reasons.append(f"连涨{consecutive_up}天，获利盘压力大")
+    else:
+        if consecutive_up >= 4:
+            penalty = min(penalty + 0.30, 0.95)
+            reasons.append(f"连涨{consecutive_up}天，获利盘压力大")
+        elif consecutive_up >= 3:
+            penalty = min(penalty + 0.15, 0.90)
+            reasons.append(f"连涨{consecutive_up}天")
 
-    # 涨停叠加
-    if is_limit_up and total_change >= 20:
+    # 涨停叠加（涨停池不叠加此惩罚）
+    if not is_zt_pool and is_limit_up and total_change >= 20:
         penalty = min(penalty + 0.10, 0.95)
         reasons.append("涨停收盘，次日高开低走风险")
 
@@ -187,11 +210,19 @@ def batch_chase_risk(
     trade_date: str,
     lookback_days: int = 5,
     db_path: str = DB_PATH,
+    zt_codes: set[str] | None = None,
 ) -> dict[str, ChaseRisk]:
-    """批量计算追高风险。"""
+    """批量计算追高风险。
+
+    Args:
+        zt_codes: 涨停池股票代码集合，这些股票会放宽追高惩罚阈值。
+    """
     results = {}
     for code in codes:
-        risk = compute_chase_risk(code, trade_date, lookback_days, db_path)
+        risk = compute_chase_risk(
+            code, trade_date, lookback_days, db_path,
+            is_zt_pool=(zt_codes is not None and code in zt_codes),
+        )
         if risk:
             results[code] = risk
     return results

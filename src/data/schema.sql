@@ -291,3 +291,186 @@ CREATE TABLE IF NOT EXISTS strategy_trades (
 
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_name ON strategy_trades(strategy_name);
 CREATE INDEX IF NOT EXISTS idx_strategy_trades_date ON strategy_trades(entry_date);
+
+-- 现金流量表
+CREATE TABLE IF NOT EXISTS cash_flow_stmt (
+    stock_code       TEXT NOT NULL,
+    report_date      TEXT NOT NULL,
+    operate_cash_flow REAL,
+    invest_cash_flow  REAL,
+    finance_cash_flow REAL,
+    free_cash_flow    REAL,
+    cash_change       REAL,
+    PRIMARY KEY (stock_code, report_date)
+);
+
+-- 资产负债表
+CREATE TABLE IF NOT EXISTS balance_sheet (
+    stock_code         TEXT NOT NULL,
+    report_date        TEXT NOT NULL,
+    total_assets       REAL,
+    total_liabilities  REAL,
+    total_equity       REAL,
+    current_assets     REAL,
+    current_liabilities REAL,
+    cash_and_equiv     REAL,
+    accounts_receivable REAL,
+    inventory          REAL,
+    goodwill           REAL,
+    PRIMARY KEY (stock_code, report_date)
+);
+
+-- 行业每日景气度
+CREATE TABLE IF NOT EXISTS industry_daily (
+    industry_code TEXT NOT NULL,
+    industry_name TEXT NOT NULL,
+    trade_date    TEXT NOT NULL,
+    avg_pe        REAL,
+    avg_pb        REAL,
+    avg_roe       REAL,
+    member_count  INTEGER,
+    up_count      INTEGER,
+    down_count    INTEGER,
+    total_volume  REAL,
+    total_amount  REAL,
+    PRIMARY KEY (industry_code, trade_date)
+);
+
+-- 个股-行业映射
+CREATE TABLE IF NOT EXISTS stock_industry_mapping (
+    stock_code   TEXT PRIMARY KEY,
+    industry_code TEXT NOT NULL,
+    industry_name TEXT NOT NULL,
+    update_date  TEXT NOT NULL
+);
+
+-- 北向资金每日净流入(亿元)
+CREATE TABLE IF NOT EXISTS northbound_flow (
+    trade_date   TEXT PRIMARY KEY,
+    hgt_net      REAL,          -- 沪股通净流入(亿元)
+    sgt_net      REAL,          -- 深股通净流入(亿元)
+    total_net    REAL,          -- 北向合计净流入(亿元)
+    hgt_buy      REAL,          -- 沪股通买入成交额(亿元)
+    hgt_sell     REAL,          -- 沪股通卖出成交额(亿元)
+    sgt_buy      REAL,          -- 深股通买入成交额(亿元)
+    sgt_sell     REAL,          -- 深股通卖出成交额(亿元)
+    snapshot_time TEXT DEFAULT (datetime('now'))
+);
+
+-- 解禁日历(个股级别)
+CREATE TABLE IF NOT EXISTS lockup_calendar (
+    stock_code       TEXT NOT NULL,
+    stock_name       TEXT DEFAULT '',
+    free_date        TEXT NOT NULL,    -- 解禁日期
+    free_shares      REAL,            -- 解禁数量(万股)
+    lift_market_cap  REAL,            -- 解禁市值(万元)
+    free_ratio       REAL,            -- 占流通股比
+    total_ratio      REAL,            -- 占总股本比
+    free_type        TEXT DEFAULT '', -- 解禁类型(定增/首发原股东等)
+    snapshot_time    TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (stock_code, free_date, free_type)
+);
+
+-- 交易记忆 — 盘后复盘归因
+CREATE TABLE IF NOT EXISTS trade_memory (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER NOT NULL, -- 关联daemon_trades.id
+    code            TEXT NOT NULL,
+    name            TEXT DEFAULT '',
+    strategy        TEXT NOT NULL,    -- 策略A/B/C
+    action          TEXT NOT NULL,    -- buy/sell
+    pnl_pct         REAL DEFAULT 0,  -- 盈亏%
+    hold_days       INTEGER DEFAULT 0,
+    market_phase    TEXT DEFAULT '',  -- 买入时市场情绪(正常/退潮/冰点)
+    industry        TEXT DEFAULT '',  -- 行业
+    entry_signal    TEXT DEFAULT '',  -- 买入信号类型
+    exit_reason     TEXT DEFAULT '',  -- 卖出原因
+    attribution     TEXT DEFAULT '',  -- LLM归因分析
+    lessons         TEXT DEFAULT '',  -- 经验教训(一句话)
+    similar_win_rate REAL DEFAULT 0, -- 历史相似交易胜率
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- 因子动态权重(IC/ICIR驱动, 每周更新)
+CREATE TABLE IF NOT EXISTS factor_weights (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy     TEXT NOT NULL,
+    factor_name  TEXT NOT NULL,
+    ic_mean      REAL DEFAULT 0,
+    ic_std       REAL DEFAULT 0,
+    icir         REAL DEFAULT 0,
+    ic_win_rate  REAL DEFAULT 0,
+    weight       REAL DEFAULT 0,
+    method       TEXT DEFAULT 'empirical',  -- ic_driven / empirical
+    updated_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE(strategy, factor_name)
+);
+
+-- 龙虎榜席位明细(买入/卖出TOP5营业部)
+CREATE TABLE IF NOT EXISTS lhb_seats (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code    TEXT NOT NULL,
+    trade_date    TEXT NOT NULL,
+    seat_name     TEXT NOT NULL,        -- 营业部名称
+    direction     TEXT NOT NULL,        -- 买入/卖出
+    buy_amount    REAL DEFAULT 0,       -- 买入金额
+    sell_amount   REAL DEFAULT 0,       -- 卖出金额
+    net_amount    REAL DEFAULT 0,       -- 净额
+    seat_type     TEXT DEFAULT '',      -- 机构/游资/散户/普通
+    reason        TEXT DEFAULT '',      -- 上榜原因
+    snapshot_time TEXT DEFAULT (datetime('now')),
+    UNIQUE(stock_code, trade_date, seat_name, direction)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lhb_seats_code ON lhb_seats(stock_code);
+CREATE INDEX IF NOT EXISTS idx_lhb_seats_date ON lhb_seats(trade_date);
+
+-- LLM调用统计
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date    TEXT NOT NULL,
+    caller        TEXT DEFAULT '',
+    provider      TEXT DEFAULT '',
+    model         TEXT DEFAULT '',
+    success       INTEGER DEFAULT 0,
+    latency_ms    INTEGER DEFAULT 0,
+    input_tokens  INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cost          REAL DEFAULT 0,
+    error         TEXT DEFAULT '',
+    created_at    TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_date ON llm_usage(trade_date);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_caller ON llm_usage(caller);
+
+-- 盘后采集日志
+CREATE TABLE IF NOT EXISTS collect_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date  TEXT NOT NULL,
+    total       INTEGER DEFAULT 0,
+    success     INTEGER DEFAULT 0,
+    failed      INTEGER DEFAULT 0,
+    duration_s  REAL DEFAULT 0,
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE(trade_date)
+);
+
+-- 辩论式信号融合结果(Bull/Bear/Judge)
+CREATE TABLE IF NOT EXISTS debate_results (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code   TEXT NOT NULL,
+    stock_name   TEXT DEFAULT '',
+    strategy     TEXT DEFAULT '',
+    verdict      TEXT DEFAULT '',       -- bull/bear/neutral
+    confidence   INTEGER DEFAULT 50,   -- 0-100
+    reasoning    TEXT DEFAULT '',
+    key_risk     TEXT DEFAULT '',
+    key_catalyst TEXT DEFAULT '',
+    bull_points  TEXT DEFAULT '[]',     -- JSON array
+    bear_points  TEXT DEFAULT '[]',     -- JSON array
+    created_at   TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_debate_code ON debate_results(stock_code);
+CREATE INDEX IF NOT EXISTS idx_debate_date ON debate_results(created_at);

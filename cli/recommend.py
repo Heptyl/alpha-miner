@@ -23,6 +23,78 @@ from src.data.storage import Storage
 console = Console()
 
 
+def _auto_review(report_date: str, db_path: str):
+    """自动复盘前一次推荐的实际情况。"""
+    from src.strategy.review import run_review, format_review_wechat
+
+    review = run_review(report_date, db_path=db_path)
+    if review is None:
+        return  # 没有前一日推荐，跳过
+
+    # 输出复盘结果
+    console.print()
+    console.print(Panel(
+        f"回顾 [bold]{review.rec_date}[/bold] 的 {review.total} 只推荐",
+        title=f"[bold]自动复盘 — {review.review_date}[/bold]",
+        border_style="yellow",
+    ))
+
+    review_table = Table(show_lines=True, border_style="dim")
+    review_table.add_column("#", width=2)
+    review_table.add_column("代码", width=8)
+    review_table.add_column("名称", width=8)
+    review_table.add_column("等级", width=4)
+    review_table.add_column("推荐买", style="yellow", width=8)
+    review_table.add_column("目标", style="green", width=8)
+    review_table.add_column("止损", style="red", width=8)
+    review_table.add_column("实际开", width=8)
+    review_table.add_column("实际收", width=8)
+    review_table.add_column("涨跌", width=6)
+    review_table.add_column("触及买点", width=6)
+    review_table.add_column("盈亏%", width=8)
+
+    for i, s in enumerate(review.stocks, 1):
+        chg_color = "green" if s.today_change_pct > 0 else "red"
+        buy_icon = "✓" if s.hit_buy_zone else "✗"
+        profit_color = "green" if s.profit_pct > 0 else "red"
+
+        review_table.add_row(
+            str(i),
+            s.stock_code,
+            s.stock_name,
+            s.signal_level,
+            f"{s.rec_buy_price:.2f}",
+            f"{s.rec_target:.2f}",
+            f"{s.rec_stop_loss:.2f}",
+            f"{s.today_open:.2f}",
+            f"{s.today_close:.2f}",
+            f"[{chg_color}]{s.today_change_pct:+.1f}%[/{chg_color}]",
+            buy_icon,
+            f"[{profit_color}]{s.profit_pct:+.1f}%[/{profit_color}]",
+        )
+
+    console.print(review_table)
+
+    # 汇总
+    console.print(
+        f"  触及买点: {review.hit_buy_count}/{review.total} | "
+        f"命中目标: {review.hit_target_count}/{review.total} | "
+        f"触发止损: {review.hit_stop_count}/{review.total} | "
+        f"平均盈亏: [bold]{review.avg_profit_pct:+.2f}%[/bold] | "
+        f"胜率: [bold]{review.win_rate:.0f}%[/bold]"
+    )
+
+    # 保存复盘报告
+    review_path = f"recommendations/{report_date}_review.json"
+    Path(review_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(review_path).write_text(
+        json.dumps(review.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    console.print(f"  [dim]复盘报告已保存: {review_path}[/dim]")
+    console.print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Alpha Miner 每日个股推荐")
     parser.add_argument("--date", type=str, default=None, help="推荐日期 YYYY-MM-DD，默认今天")
@@ -44,6 +116,9 @@ def main():
 
     console.print(f"\n[bold cyan]生成每日个股推荐: {report_date}[/bold cyan]")
 
+    # ── 自动复盘前一日推荐 ──
+    _auto_review(report_date, args.db)
+
     from src.strategy.recommend import RecommendEngine
     engine = RecommendEngine(db)
 
@@ -59,6 +134,15 @@ def main():
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     Path(save_path).write_text(report.to_text(), encoding="utf-8")
     console.print(f"\n[dim]推荐报告已保存: {save_path}[/dim]")
+
+    # 同时保存JSON (供Web UI读取)
+    json_path = f"recommendations/{report_date}_recommend_v2.json"
+    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(json_path).write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    console.print(f"[dim]推荐JSON已保存: {json_path}[/dim]")
 
 
 def _print_rich(report):
@@ -184,8 +268,9 @@ def _print_stock_detail(idx: int, stock):
     # 因子 & 技术
     if stock.technical:
         ta = stock.technical
+        ma5_str = f"{ta.ma5:.2f}" if ta.ma5 else "N/A"
         detail_lines.append(
-            f"  趋势: {ta.trend} | MA5={ta.ma5:.2f if ta.ma5 else 'N/A'}"
+            f"  趋势: {ta.trend} | MA5={ma5_str}"
             f" | 量比={ta.volume_ratio:.1f}"
             f" | 动量={ta.momentum_score:.2f}"
         )

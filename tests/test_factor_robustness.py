@@ -3,6 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 
 from src.data.storage import Storage
 
@@ -164,11 +165,19 @@ class TestFactorRegistry:
 
     def test_registry_lists_all_factors(self):
         """注册表必须能列出所有已注册因子。"""
+        import yaml
         from src.factors.registry import FactorRegistry
+
         reg = FactorRegistry()
         reg.load_from_yaml()
         factors = reg.list_factors()
-        assert len(factors) >= 8, f"注册因子只有 {len(factors)} 个，期望 >= 8"
+        config = yaml.safe_load(Path("config/factors.yaml").read_text(encoding="utf-8"))
+        configured = {
+            item["name"]
+            for category in ("formula_factors", "narrative_factors")
+            for item in config.get(category, [])
+        }
+        assert set(factors) == configured
 
     def test_each_factor_has_required_attributes(self):
         """每个因子必须有 name / factor_type / compute。"""

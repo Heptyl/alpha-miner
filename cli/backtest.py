@@ -244,12 +244,43 @@ def backtest_factor(
 
     if ic_list:
         ic_arr = np.array(ic_list)
-        print(f"\n  IC 均值: {np.mean(ic_arr):.4f}")
-        print(f"  ICIR:    {np.mean(ic_arr)/np.std(ic_arr):.4f}" if np.std(ic_arr) > 0 else "  ICIR: N/A")
-        print(f"  IC 胜率: {(ic_arr > 0).sum() / len(ic_arr):.2%}")
+        mean_ic = float(np.mean(ic_arr))
+        icir = float(np.mean(ic_arr) / np.std(ic_arr)) if np.std(ic_arr) > 0 else 0
+        ic_win_rate = float((ic_arr > 0).sum() / len(ic_arr) * 100)
+        print(f"\n  IC 均值: {mean_ic:.4f}")
+        print(f"  ICIR:    {icir:.4f}" if icir else "  ICIR: N/A")
+        print(f"  IC 胜率: {ic_win_rate:.2f}%")
         print(f"  IC 样本数: {len(ic_list)}")
+    else:
+        mean_ic = 0
+        icir = 0
+        ic_win_rate = 0
 
     print(f"{'='*60}")
+
+    # 返回结构化结果
+    long_short = 0
+    if all_group_returns.get(quantiles) and all_group_returns.get(1):
+        long_short = float((np.mean(all_group_returns[quantiles]) - np.mean(all_group_returns[1])) * 100)
+
+    group_stats = {}
+    for q in range(1, quantiles + 1):
+        rets = all_group_returns.get(q, [])
+        if rets:
+            group_stats[f"Q{q}"] = {"mean_ret": float(np.mean(rets) * 100), "days": len(rets)}
+
+    return {
+        "factor": factor_name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "trade_days": len(trade_dates),
+        "sample_days": len(ic_list),
+        "mean_ic": mean_ic,
+        "icir": icir,
+        "ic_win_rate": ic_win_rate,
+        "long_short_return": long_short,
+        "groups": group_stats,
+    }
 
 
 def compute_all(db_path: str = "data/alpha_miner.db"):
