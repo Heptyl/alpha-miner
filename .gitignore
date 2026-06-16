@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .uvtmp/
+.uv_tmp/
 *.egg-info/
 /data/
 *.egg
@@ -19,4 +20,5 @@ config/settings.yaml
 
 # 开发工具
 .claude/
-factors/
+# 仅忽略仓库根的旧散落脚本目录，勿误伤 src/factors/
+/factors/

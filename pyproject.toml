@@ -15,6 +15,7 @@ dependencies = [
     "anthropic>=0.30",
     "baostock>=0.9.1",
     "tushare>=1.4.29",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
