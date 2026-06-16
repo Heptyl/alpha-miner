@@ -4,10 +4,11 @@
 A股量化因子挖掘系统。基于行为金融学理论，从市场数据中挖掘、验证、进化短线交易因子。
 
 ## 环境
-- **OS**: WSL2 Ubuntu (Linux)
+- **OS**: Windows 11（直接用 uv + .venv 跑；CLAUDE.md 旧版写的 WSL2 已过时）
 - **Python**: >= 3.11
-- **包管理**: uv
+- **包管理**: uv（Windows 上 `uv sync` 需先把 TEMP 指到项目内目录，规避 DLP 拦截）
 - **数据库**: SQLite (data/alpha_miner.db)
+- **编码**: Windows 终端跑 pytest/CLI 需 `$env:PYTHONUTF8='1'`
 
 ## 项目结构
 ```
@@ -58,6 +59,12 @@ tests/           — 测试
 
 ## 常用命令
 ```bash
+# 主控制台（推荐入口：Web UI，免手动敲命令；双击 dashboard.bat 亦可）
+uv run python scripts/dashboard.py --open
+
+# 每日完整流程（跨平台，含第8步审视简报）
+uv run python -m cli daily
+
 # 安装依赖
 uv sync
 
@@ -87,6 +94,8 @@ python -m cli.report --date 2024-06-15
 - 网络请求统一重试3次，间隔2秒
 - 非交易日返回空DataFrame
 - 所有CLI用click框架，rich美化输出
+- **因子中文展示统一走 `src/factors/naming.py`**（映射表 `config/factor_aliases.yaml`：
+  cn/desc/detail/note），任何 UI/简报/推送不得硬编码因子中文名
 
 ## Harness Plugin（推荐）
 
