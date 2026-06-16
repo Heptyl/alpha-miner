@@ -4,6 +4,8 @@
 子进程用当前解释器跑微型 python -c 片段，几百毫秒内结束。
 """
 
+import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -113,5 +115,73 @@ def test_render_page_contains_commands_and_cn_factors():
     assert "机构买入" in page          # 因子中文名出现
     assert "lhb_institution" in page   # 英文名同样可见
     assert "风控过滤" in page          # 决策D role 中文化
-    for c in dashboard.COMMANDS:       # 每个白名单命令都有按钮
+    for c in dashboard.COMMANDS:       # 每个白名单命令都有按钮（主按钮或折叠区）
         assert f"runCmd('{c['id']}')" in page
+
+
+def test_render_page_has_health_banner_and_brief_iframe():
+    page = dashboard.render_page()
+    assert 'class="banner' in page          # 健康横幅存在
+    assert any(ic in page for ic in ("🟢", "🟡", "🔴"))   # 三色灯之一
+    assert 'id="briefframe"' in page        # 简报内嵌 iframe
+    for cid in dashboard.PRIMARY_IDS:        # 四个主按钮都在首屏
+        assert cid in page
+
+
+# ---------------- 系统健康判断 ----------------
+
+def test_system_state_bad_when_db_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "DB_PATH", tmp_path / "nope.db")
+    st = dashboard.system_state()
+    assert st["level"] == "bad" and "不存在" in st["verdict"]
+
+
+def test_system_state_flags_mining_silence(monkeypatch, tmp_path):
+    """挖掘日志最后记录超阈值 → bad，verdict 点名静默天数。"""
+    from datetime import date, datetime, timedelta
+
+    # 构造一个有数据但挖掘早已静默的 fixture DB
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE daily_price (trade_date TEXT)")
+    conn.execute("INSERT INTO daily_price VALUES (?)", (date.today().isoformat(),))
+    conn.execute("CREATE TABLE regime_state (trade_date TEXT, regime_type TEXT)")
+    conn.commit(); conn.close()
+
+    log = tmp_path / "mining.jsonl"
+    old = (datetime.now() - timedelta(days=40)).isoformat()
+    log.write_text(json.dumps({"timestamp": old, "name": "x"}) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    monkeypatch.setattr(dashboard, "MINING_LOG", log)
+    st = dashboard.system_state(date.today())
+    assert st["level"] == "bad"
+    assert "静默" in st["verdict"]
+
+
+def test_system_state_ok_when_fresh(monkeypatch, tmp_path):
+    from datetime import date, datetime
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE daily_price (trade_date TEXT)")
+    conn.execute("INSERT INTO daily_price VALUES (?)", (date.today().isoformat(),))
+    conn.execute("CREATE TABLE regime_state (trade_date TEXT, regime_type TEXT)")
+    conn.execute("INSERT INTO regime_state VALUES (?, ?)",
+                 (date.today().isoformat(), "normal"))
+    conn.commit(); conn.close()
+
+    log = tmp_path / "mining.jsonl"
+    log.write_text(json.dumps({"timestamp": datetime.now().isoformat()}) + "\n",
+                   encoding="utf-8")
+    brief = tmp_path / "latest.html"
+    brief.write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "DB_PATH", db)
+    monkeypatch.setattr(dashboard, "MINING_LOG", log)
+    monkeypatch.setattr(dashboard, "BRIEF_LATEST", brief)
+    st = dashboard.system_state(date.today())
+    assert st["level"] == "ok"
+    # 状态条覆盖关键维度
+    keys = {i["k"] for i in st["items"]}
+    assert {"行情数据", "挖掘管线"} <= keys

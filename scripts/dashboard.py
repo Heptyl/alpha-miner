@@ -3,6 +3,9 @@
 纯标准库实现（http.server + subprocess + threading），不引入任何新依赖；
 命令一律以当前解释器（.venv 的 python）作为子进程串行执行，同一时刻只跑一个任务。
 
+极简优先：首屏一眼看"系统是死是活"（健康横幅）+ 四个大按钮跑常用脚本，
+结果就地流式显示、简报跑完自动内嵌。更多命令与因子映射表默认折叠。
+
 用法:
     uv run python scripts/dashboard.py [--port 8765] [--open]
     或双击项目根目录 dashboard.bat
@@ -35,9 +38,18 @@ from src.factors.naming import get_naming  # noqa: E402
 
 DB_PATH = ROOT / "data" / "alpha_miner.db"
 BRIEF_LATEST = ROOT / "reports" / "brief" / "latest.html"
+MINING_LOG = ROOT / "data" / "mining_log.jsonl"
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_LINES = 5000
+
+# 首屏四个大按钮（其余命令收进"更多命令"折叠）
+PRIMARY_IDS = ["daily", "brief_gen", "checkup", "collect_today"]
+PRIMARY_ICON = {"daily": "▶", "brief_gen": "📄", "checkup": "🩺", "collect_today": "⬇"}
+
+# 静默/滞后阈值（与审视简报口径一致）
+MINING_SILENCE_DAYS = 7
+STALE_RED_DAYS = 1
 
 # ----------------------------------------------------------------------
 # 命令白名单（argv 不含解释器；{date}/{start}/{end}/{factor} 为占位符）
@@ -50,10 +62,10 @@ REGIME_SNIPPET = ("from src.data.storage import Storage; "
 COMMANDS: list[dict] = [
     # ---- 每日流程 ----
     {"id": "daily", "group": "每日流程", "label": "一键每日全流程",
-     "desc": "采集→因子→Regime→漂移→进化→日报→剧本→复盘（15:40后跑）",
+     "desc": "采集→因子→Regime→漂移→进化→日报→剧本→复盘→简报（15:40后跑）",
      "argv": ["-m", "cli", "daily", "--date", "{date}"], "params": ["date"]},
-    {"id": "brief_gen", "group": "每日流程", "label": "生成审视简报",
-     "desc": "只读扫描 DB/日志 → reports/brief/latest.html",
+    {"id": "brief_gen", "group": "每日流程", "label": "生成并查看简报",
+     "desc": "只读扫描 DB/日志 → 简报，跑完自动在下方内嵌展示",
      "argv": ["scripts/generate_brief.py"], "params": []},
 
     # ---- 数据 ----
@@ -184,7 +196,7 @@ class JobRunner:
             return {"running": self.job["status"] == "running",
                     "label": self.job["label"], "status": self.job["status"],
                     "rc": self.job["rc"], "started": self.job["started"],
-                    "ended": self.job["ended"],
+                    "ended": self.job["ended"], "cmd_id": self.job.get("cmd_id"),
                     "lines": lines[since:], "next": len(lines)}
 
 
@@ -211,44 +223,137 @@ def build_argv(cmd: dict, params: dict[str, str]) -> tuple[list[str] | None, str
 
 
 # ----------------------------------------------------------------------
-# 只读概览
+# 系统健康快照（全部只读，失败如实呈现）
 # ----------------------------------------------------------------------
 
-def overview() -> list[dict]:
-    """快速只读概览：关键表最新日期 / regime / DB 体积。失败如实显示。"""
+def _weekday_lag(latest: str, today: date) -> int | None:
+    """latest（YYYY-MM-DD...）到 today 的工作日数，近似交易日滞后。"""
+    try:
+        d = date.fromisoformat(str(latest)[:10])
+    except (ValueError, TypeError):
+        return None
+    if d >= today:
+        return 0
+    lag, cur = 0, d + timedelta(days=1)
+    while cur <= today:
+        if cur.weekday() < 5:
+            lag += 1
+        cur += timedelta(days=1)
+    return lag
+
+
+def _mining_silence(today: date) -> int | None:
+    """挖掘日志最后一条记录距今天数；无日志返回 None。"""
+    if not MINING_LOG.exists():
+        return None
+    last = ""
+    try:
+        with open(MINING_LOG, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    last = line
+    except OSError:
+        return None
+    if not last:
+        return None
+    try:
+        ts = datetime.fromisoformat(json.loads(last).get("timestamp", ""))
+        return (today - ts.date()).days
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def _worse(cur: str, new: str) -> str:
+    order = {"ok": 0, "warn": 1, "bad": 2}
+    return new if order[new] > order[cur] else cur
+
+
+def system_state(today: date | None = None) -> dict:
+    """一行健康结论(level/verdict) + 状态条 items。只读，缺什么报什么。"""
+    today = today or date.today()
     items: list[dict] = []
+    problems: list[str] = []
+    level = "ok"
+
     if not DB_PATH.exists():
-        return [{"k": "数据库", "v": "不存在"}]
-    items.append({"k": "DB 体积", "v": f"{DB_PATH.stat().st_size / 1e6:.0f} MB"})
+        return {"level": "bad", "verdict": "数据库不存在，系统尚未初始化采集",
+                "items": [{"k": "数据库", "v": "不存在", "s": "bad"}]}
+
+    items.append({"k": "DB", "v": f"{DB_PATH.stat().st_size / 1e6:.0f} MB", "s": "ok"})
+
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        for label, table in [("行情最新", "daily_price"), ("涨停池最新", "zt_pool"),
-                             ("因子值最新", "factor_values")]:
-            try:
-                v = conn.execute(
-                    f"SELECT MAX(substr(trade_date,1,10)) FROM {table}").fetchone()[0]
-                items.append({"k": label, "v": v or "空表"})
-            except sqlite3.Error:
-                items.append({"k": label, "v": "查询失败"})
+        # 行情数据滞后 —— 系统"还在喂数据吗"的主信号
+        v = conn.execute(
+            "SELECT MAX(substr(trade_date,1,10)) FROM daily_price").fetchone()[0]
+        if v:
+            lag = _weekday_lag(v, today)
+            if lag is None:
+                items.append({"k": "行情数据", "v": str(v), "s": "warn"})
+            elif lag <= 0:
+                items.append({"k": "行情数据", "v": f"{v}（最新）", "s": "ok"})
+            elif lag <= STALE_RED_DAYS:
+                items.append({"k": "行情数据", "v": f"{v}（滞后{lag}日）", "s": "warn"})
+                level = _worse(level, "warn")
+            else:
+                items.append({"k": "行情数据", "v": f"{v}（滞后{lag}个工作日）", "s": "bad"})
+                problems.append(f"行情数据滞后 {lag} 个工作日")
+                level = _worse(level, "bad")
+        else:
+            items.append({"k": "行情数据", "v": "空表", "s": "bad"})
+            problems.append("行情表为空")
+            level = _worse(level, "bad")
+
         try:
             row = conn.execute("SELECT trade_date, regime_type FROM regime_state "
                                "ORDER BY trade_date DESC LIMIT 1").fetchone()
-            items.append({"k": "Regime", "v": f"{row[1]} ({row[0]})" if row else "无"})
+            items.append({"k": "Regime", "v": f"{row[1]} ({row[0]})" if row else "无",
+                          "s": "ok" if row else "warn"})
         except sqlite3.Error:
-            items.append({"k": "Regime", "v": "查询失败"})
+            items.append({"k": "Regime", "v": "查询失败", "s": "warn"})
         conn.close()
     except sqlite3.Error as e:
-        items.append({"k": "数据库", "v": f"打开失败: {e}"})
+        items.append({"k": "数据库", "v": f"打开失败: {e}", "s": "bad"})
+        problems.append("数据库打开失败")
+        level = _worse(level, "bad")
+
+    # 挖掘管线是否还在转 —— 系统"大脑是否停摆"的主信号
+    silence = _mining_silence(today)
+    if silence is None:
+        items.append({"k": "挖掘管线", "v": "无日志", "s": "bad"})
+        problems.append("挖掘日志缺失")
+        level = _worse(level, "bad")
+    elif silence > MINING_SILENCE_DAYS:
+        items.append({"k": "挖掘管线", "v": f"静默 {silence} 天", "s": "bad"})
+        problems.append(f"挖掘管线静默 {silence} 天")
+        level = _worse(level, "bad")
+    else:
+        items.append({"k": "挖掘管线", "v": "今日活跃" if silence == 0 else f"{silence} 天前",
+                      "s": "ok"})
+
+    # 简报新鲜度
     if BRIEF_LATEST.exists():
         ts = datetime.fromtimestamp(BRIEF_LATEST.stat().st_mtime)
-        items.append({"k": "最新简报", "v": ts.strftime("%m-%d %H:%M")})
+        age = (today - ts.date()).days
+        items.append({"k": "最新简报", "v": ts.strftime("%m-%d %H:%M"),
+                      "s": "ok" if age <= 3 else "warn"})
+        if age > 3:
+            level = _worse(level, "warn")
     else:
-        items.append({"k": "最新简报", "v": "尚未生成"})
-    return items
+        items.append({"k": "最新简报", "v": "尚未生成", "s": "warn"})
+        level = _worse(level, "warn")
+
+    if level == "ok":
+        verdict = "系统运转正常，数据与挖掘管线均在线。"
+    elif level == "warn":
+        verdict = "基本正常，但有需要留意的项：" + ("；".join(problems) or "见下方状态。")
+    else:
+        verdict = "系统存在停摆/缺数据问题：" + "；".join(problems)
+    return {"level": level, "verdict": verdict, "items": items}
 
 
 # ----------------------------------------------------------------------
-# 页面渲染（占位符替换，避免 format 与 CSS/JS 花括号冲突）
+# 页面渲染（占位符替换，避免与 CSS/JS 花括号冲突）
 # ----------------------------------------------------------------------
 
 PAGE = """<!DOCTYPE html>
@@ -261,39 +366,61 @@ PAGE = """<!DOCTYPE html>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-         max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px;
+         max-width: 940px; margin: 0 auto; padding: 20px 16px 60px;
          color: #1a1a2e; background: #fafafa; line-height: 1.55; }
   h1 { font-size: 21px; margin: 0 0 2px; }
-  h2 { font-size: 15px; margin: 22px 0 8px; padding-bottom: 5px;
-       border-bottom: 2px solid #e0e0e0; }
-  .meta { color: #777; font-size: 12.5px; }
-  .snap { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .meta { color: #888; font-size: 12.5px; }
+  .banner { font-size: 16px; font-weight: 700; padding: 14px 18px; border-radius: 10px;
+            margin: 14px 0 10px; }
+  .banner.ok   { background: #eaf6ea; color: #1f7a3a; border: 1px solid #bfe3bf; }
+  .banner.warn { background: #fdf3e3; color: #9a6a14; border: 1px solid #f0d6a8; }
+  .banner.bad  { background: #fdeceae8; color: #b32417; border: 1px solid #f1b8b1; }
+  .banner .ico { font-size: 18px; margin-right: 8px; }
+  .snap { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 4px; }
   .snap .item { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px;
-                padding: 6px 12px; font-size: 13px; }
+                padding: 6px 12px; font-size: 13px; border-left: 4px solid #ccc; }
+  .snap .item.ok   { border-left-color: #27ae60; }
+  .snap .item.warn { border-left-color: #e8a33d; }
+  .snap .item.bad  { border-left-color: #c0392b; }
   .snap .item .k { color: #888; font-size: 11.5px; display: block; }
-  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
-             background: #fff; border: 1px solid #e3e3e3; border-radius: 8px;
-             padding: 10px 14px; margin: 10px 0; }
-  .toolbar label { font-size: 12px; color: #666; display: block; }
-  .toolbar input, .toolbar select { font-size: 13px; padding: 4px 6px;
-             border: 1px solid #ccc; border-radius: 5px; }
+  .params { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+            font-size: 12px; color: #777; margin: 12px 0 6px; }
+  .params input, .params select { font-size: 13px; padding: 3px 6px;
+            border: 1px solid #ccc; border-radius: 5px; }
+  .params label { display: block; color: #888; margin-bottom: 2px; }
+  .primary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+             gap: 12px; margin: 8px 0 4px; }
+  button.big { background: #fff; border: 2px solid #3a6ea5; border-radius: 12px;
+               padding: 16px 16px; font-size: 16px; font-weight: 700; color: #25496b;
+               cursor: pointer; text-align: left; }
+  button.big:hover { background: #eef4fb; }
+  button.big:disabled { opacity: .45; cursor: not-allowed; }
+  button.big .d { display: block; color: #888; font-size: 12px; font-weight: 400;
+                  margin-top: 4px; }
+  details { margin: 14px 0; }
+  details > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #3a6ea5;
+                      padding: 6px 0; }
   .grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
   button.cmd { background: #fff; border: 1px solid #c9d4e0; border-radius: 8px;
-               padding: 8px 12px; font-size: 13.5px; cursor: pointer;
-               text-align: left; min-width: 180px; }
+               padding: 7px 11px; font-size: 13px; cursor: pointer; text-align: left;
+               min-width: 175px; }
   button.cmd:hover { background: #eef4fb; border-color: #3a6ea5; }
   button.cmd:disabled { opacity: .45; cursor: not-allowed; }
-  button.cmd .d { display: block; color: #888; font-size: 11.5px; font-weight: 400; }
-  button.cmd .p { color: #a07b2a; font-size: 11px; }
-  #status { font-size: 13.5px; margin: 8px 0; }
-  #status .run { color: #a06000; } #status .ok { color: #2e7d46; }
+  button.cmd .d { display: block; color: #999; font-size: 11px; font-weight: 400; }
+  button.cmd .p { color: #a07b2a; font-size: 10.5px; }
+  .gtitle { font-size: 12.5px; color: #999; margin: 8px 0 2px; }
+  #status { font-size: 13.5px; margin: 12px 0 6px; }
+  #status .run { color: #a06000; } #status .ok { color: #1f7a3a; }
   #status .fail { color: #c0392b; font-weight: 600; }
   #stopbtn { background: #fdecea; border: 1px solid #c0392b; color: #c0392b;
              border-radius: 6px; padding: 3px 12px; cursor: pointer; font-size: 12.5px;
              display: none; margin-left: 10px; }
-  pre#out { background: #1e1e2e; color: #d8e2d8; padding: 12px 14px; min-height: 90px;
-            max-height: 460px; overflow: auto; border-radius: 8px; font-size: 12.5px;
+  pre#out { background: #1e1e2e; color: #d8e2d8; padding: 12px 14px; min-height: 80px;
+            max-height: 440px; overflow: auto; border-radius: 8px; font-size: 12.5px;
             white-space: pre-wrap; word-break: break-all; }
+  #briefwrap { display: none; margin-top: 10px; }
+  #briefframe { width: 100%; height: 600px; border: 1px solid #e3e3e3; border-radius: 8px;
+                background: #fff; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; background: #fff; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee;
            vertical-align: top; }
@@ -302,61 +429,64 @@ PAGE = """<!DOCTYPE html>
   td.en { font-family: Consolas, monospace; font-size: 12px; color: #555;
           white-space: nowrap; }
   .tag { display: inline-block; border-radius: 4px; padding: 0 7px; font-size: 11.5px; }
-  .tag.alpha { background: #eef6ee; color: #2e7d46; border: 1px solid #cde5cd; }
+  .tag.alpha  { background: #eef6ee; color: #2e7d46; border: 1px solid #cde5cd; }
   .tag.filter { background: #fdf3e7; color: #a06000; border: 1px solid #f0d5b0; }
-  details summary { cursor: pointer; color: #3a6ea5; font-size: 12.5px; }
-  details .detail { margin: 6px 0 2px; color: #333; font-size: 12.8px; }
-  details .note { color: #8a6d1a; font-size: 12px; background: #fdf3d7;
-                  border-radius: 4px; padding: 3px 8px; margin-top: 4px; }
+  td .detail { margin: 6px 0 2px; color: #333; font-size: 12.5px; }
+  td .note { color: #8a6d1a; font-size: 12px; background: #fdf3d7; border-radius: 4px;
+             padding: 3px 8px; margin-top: 4px; }
   a { color: #3a6ea5; }
-  .links { font-size: 13.5px; margin: 8px 0; }
 </style>
 </head>
 <body>
 <h1>Alpha Miner 控制台</h1>
-<div class="meta">A股短线因子挖掘系统 · 本地控制台（127.0.0.1，仅本机可访问）· 页面生成于 __NOW__</div>
+<div class="meta">本地控制台（127.0.0.1，仅本机）· __NOW__ ·
+  <a href="javascript:location.reload()">刷新状态</a></div>
 
-<h2>系统概览</h2>
-<div class="snap">__OVERVIEW__</div>
-<div class="links">
-  📄 <a href="/brief" target="_blank">打开最新审视简报</a>
-  &nbsp;·&nbsp; <a href="javascript:location.reload()">刷新概览</a>
-</div>
+<div class="banner __LEVEL__"><span class="ico">__ICON__</span>__VERDICT__</div>
+<div class="snap">__SNAP__</div>
 
-<h2>参数（命令按钮标注了各自用到的参数）</h2>
-<div class="toolbar">
+<div class="params">
   <div><label>日期 date</label><input type="date" id="p_date"></div>
-  <div><label>开始 start</label><input type="date" id="p_start"></div>
-  <div><label>结束 end</label><input type="date" id="p_end"></div>
+  <div><label>体检开始 start</label><input type="date" id="p_start"></div>
+  <div><label>体检结束 end</label><input type="date" id="p_end"></div>
   <div><label>因子 factor</label><select id="p_factor">__FACTOR_OPTIONS__</select></div>
 </div>
 
-__COMMAND_GROUPS__
+<div class="primary">__PRIMARY__</div>
 
-<h2>运行输出 <button id="stopbtn" onclick="stopJob()">停止任务</button></h2>
-<div id="status">空闲，点上方按钮执行命令。</div>
+<div id="status">空闲，点上方大按钮开始；结果会显示在下面。</div>
+<button id="stopbtn" onclick="stopJob()">停止任务</button>
 <pre id="out"></pre>
+<div id="briefwrap"><iframe id="briefframe" src="/brief"></iframe></div>
 
-<h2>因子映射表（中文 ↔ 英文）</h2>
-<table>
-<thead><tr><th>中文名</th><th>英文名</th><th>类别</th><th>角色</th><th>说明</th></tr></thead>
-<tbody>__FACTOR_ROWS__</tbody>
-</table>
+<details>
+  <summary>更多命令</summary>
+  __MORE__
+</details>
+
+<details>
+  <summary>因子映射表（中文 ↔ 英文）</summary>
+  <table>
+  <thead><tr><th>中文名</th><th>英文名</th><th>类别</th><th>角色</th><th>说明</th></tr></thead>
+  <tbody>__FACTOR_ROWS__</tbody>
+  </table>
+</details>
 
 <script>
-const today = new Date(), fmt = d => d.toISOString().slice(0,10);
+const today = new Date(), fmt = d => new Date(d - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
 document.getElementById('p_date').value = fmt(today);
 document.getElementById('p_end').value = fmt(today);
 document.getElementById('p_start').value = fmt(new Date(today - 90*86400e3));
 
-let nextIdx = 0, polling = false;
+let nextIdx = 0, polling = false, lastCmd = null;
 
 function setRunning(on) {
-  document.querySelectorAll('button.cmd').forEach(b => b.disabled = on);
+  document.querySelectorAll('button.big, button.cmd').forEach(b => b.disabled = on);
   document.getElementById('stopbtn').style.display = on ? 'inline-block' : 'none';
 }
 
 async function runCmd(id) {
+  lastCmd = id;
   const body = new URLSearchParams({cmd: id,
     date: document.getElementById('p_date').value,
     start: document.getElementById('p_start').value,
@@ -367,6 +497,7 @@ async function runCmd(id) {
   if (!d.ok) { document.getElementById('status').innerHTML =
       '<span class="fail">' + d.msg + '</span>'; return; }
   document.getElementById('out').textContent = '';
+  document.getElementById('briefwrap').style.display = 'none';
   nextIdx = 0; setRunning(true);
   if (!polling) poll();
 }
@@ -386,20 +517,27 @@ async function poll() {
     if (d.running) {
       st.innerHTML = '<span class="run">⏳ 运行中: ' + d.label +
                      '（' + d.started + ' 开始）</span>';
-      setTimeout(poll, 1000); return;
+      setTimeout(poll, 1000); polling = false; return;
     }
     if (d.label) {
-      st.innerHTML = d.status === 'done'
-        ? '<span class="ok">✓ 完成: ' + d.label + '（' + d.ended + '）</span>'
-        : '<span class="fail">✗ 失败: ' + d.label + ' (exit ' + d.rc + ')</span>';
+      if (d.status === 'done') {
+        st.innerHTML = '<span class="ok">✓ 完成: ' + d.label + '（' + d.ended + '）</span>';
+        // 简报跑完自动内嵌展示
+        if (d.cmd_id === 'brief_gen') {
+          const w = document.getElementById('briefwrap');
+          w.style.display = 'block';
+          document.getElementById('briefframe').src = '/brief?t=' + Date.now();
+        }
+      } else {
+        st.innerHTML = '<span class="fail">✗ 失败: ' + d.label +
+                       ' (exit ' + d.rc + ')</span>';
+      }
     }
   } catch (e) { /* 服务停了就静默 */ }
   polling = false; setRunning(false);
 }
 
-async function stopJob() {
-  await fetch('/api/stop', {method: 'POST'});
-}
+async function stopJob() { await fetch('/api/stop', {method: 'POST'}); }
 poll();  // 页面打开时接上正在跑的任务
 </script>
 </body>
@@ -410,42 +548,61 @@ poll();  // 页面打开时接上正在跑的任务
 def render_page() -> str:
     naming = get_naming()
     esc = html.escape
+    state = system_state()
 
-    ov = "".join(f'<div class="item"><span class="k">{esc(i["k"])}</span>'
-                 f'{esc(str(i["v"]))}</div>' for i in overview())
+    snap = "".join(
+        f'<div class="item {i.get("s", "ok")}"><span class="k">{esc(i["k"])}</span>'
+        f'{esc(str(i["v"]))}</div>' for i in state["items"])
 
     opts = "".join(f'<option value="{esc(r["en"])}">{esc(r["cn"])} ({esc(r["en"])})'
                    f'</option>' for r in naming.table())
 
+    # 首屏四个大按钮
+    primary = []
+    for cid in PRIMARY_IDS:
+        c = CMD_BY_ID.get(cid)
+        if not c:
+            continue
+        ic = PRIMARY_ICON.get(cid, "▶")
+        primary.append(
+            f'<button class="big" onclick="runCmd(\'{cid}\')">{ic} {esc(c["label"])}'
+            f'<span class="d">{esc(c.get("desc", ""))}</span></button>')
+
+    # 其余命令按分组进"更多命令"折叠
     groups: dict[str, list[str]] = {}
     for c in COMMANDS:
+        if c["id"] in PRIMARY_IDS:
+            continue
         ps = c.get("params", [])
         hint = f'<span class="p">参数: {", ".join(ps)}</span>' if ps else ""
         groups.setdefault(c["group"], []).append(
             f'<button class="cmd" onclick="runCmd(\'{c["id"]}\')">'
             f'{esc(c["label"])} {hint}<span class="d">{esc(c.get("desc", ""))}'
             f'</span></button>')
-    cmd_html = "".join(
-        f"<h2>{esc(g)}</h2><div class=\"grid\">{''.join(btns)}</div>"
-        for g, btns in groups.items())
+    more = "".join(
+        f'<div class="gtitle">{esc(g)}</div><div class="grid">{"".join(b)}</div>'
+        for g, b in groups.items())
 
     rows = []
     for r in naming.table():
         note = f'<div class="note">📌 {esc(r["note"])}</div>' if r["note"] else ""
-        detail = (f'<details><summary>详细说明</summary>'
-                  f'<div class="detail">{esc(r["detail"])}</div>{note}</details>'
-                  if r["detail"] else "")
+        detail = f'<div class="detail">{esc(r["detail"])}</div>{note}' if r["detail"] else ""
         role_tag = f'<span class="tag {esc(r["role"])}">{esc(r["role_cn"])}</span>'
         rows.append(f'<tr><td class="cn">{esc(r["cn"])}</td>'
                     f'<td class="en">{esc(r["en"])}</td>'
                     f'<td>{esc(r["category_cn"])}</td><td>{role_tag}</td>'
                     f'<td>{esc(r["desc"])}{detail}</td></tr>')
 
+    icon = {"ok": "🟢", "warn": "🟡", "bad": "🔴"}[state["level"]]
     return (PAGE
             .replace("__NOW__", datetime.now().strftime("%Y-%m-%d %H:%M"))
-            .replace("__OVERVIEW__", ov)
+            .replace("__LEVEL__", state["level"])
+            .replace("__ICON__", icon)
+            .replace("__VERDICT__", esc(state["verdict"]))
+            .replace("__SNAP__", snap)
             .replace("__FACTOR_OPTIONS__", opts)
-            .replace("__COMMAND_GROUPS__", cmd_html)
+            .replace("__PRIMARY__", "".join(primary))
+            .replace("__MORE__", more)
             .replace("__FACTOR_ROWS__", "".join(rows)))
 
 
@@ -477,12 +634,15 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/status":
             since = int((parse_qs(url.query).get("since") or ["0"])[0])
             self._json(RUNNER.status(since))
+        elif url.path == "/api/state":
+            self._json(system_state())
         elif url.path == "/brief":
             if BRIEF_LATEST.exists():
                 self._send(200, BRIEF_LATEST.read_bytes(),
                            "text/html; charset=utf-8")
             else:
-                self._html("<p>简报尚未生成。回控制台点『生成审视简报』。</p>", 404)
+                self._html("<p style='font-family:sans-serif;padding:20px'>"
+                           "简报尚未生成。回控制台点『生成并查看简报』。</p>", 404)
         elif url.path == "/api/factors":
             self._json({"factors": get_naming().table()})
         elif url.path == "/favicon.ico":
@@ -505,6 +665,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "msg": err}, 400)
                 return
             ok, msg = RUNNER.start(cmd["label"], argv)
+            if ok:                       # 记录命令 id，供前端识别"简报跑完自动展示"
+                with RUNNER.lock:
+                    if RUNNER.job:
+                        RUNNER.job["cmd_id"] = cmd["id"]
             self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
         elif url.path == "/api/stop":
             self._json({"ok": True, "msg": RUNNER.stop()})
