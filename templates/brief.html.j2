@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha Miner 审视简报 — {{ report_date }}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+         max-width: 860px; margin: 0 auto; padding: 24px 16px 60px;
+         color: #1a1a2e; background: #fafafa; line-height: 1.6; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; padding-bottom: 6px;
+       border-bottom: 2px solid #e0e0e0; }
+  .meta { color: #777; font-size: 13px; }
+  .summary { font-size: 17px; margin: 14px 0; padding: 12px 16px;
+             border-radius: 8px; background: #eef6ee; border: 1px solid #cde5cd; }
+  .summary.warn { background: #fdf3e7; border-color: #f0d5b0; }
+  .banner-red { background: #c0392b; color: #fff; font-size: 20px; font-weight: 700;
+                padding: 18px 20px; border-radius: 8px; margin: 16px 0; }
+  .alert-red { background: #fdecea; border-left: 4px solid #c0392b;
+               padding: 8px 14px; margin: 8px 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; background: #f4f4f4; }
+  tr.bad td { background: #fdecea; }
+  tr.warn td { background: #fdf6e7; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         margin-right: 6px; vertical-align: middle; }
+  .dot.ok { background: #27ae60; }
+  .dot.warn { background: #e8a33d; }
+  .dot.bad { background: #c0392b; }
+  .dot.na { background: #999; }
+  .card { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px;
+          padding: 14px 16px; margin: 12px 0; }
+  .card.red { border-left: 5px solid #c0392b; }
+  .card.yellow { border-left: 5px solid #e8a33d; }
+  .card h3 { margin: 0 0 8px; font-size: 15px; }
+  .card .seg { margin: 6px 0; font-size: 13.5px; }
+  .card .seg b { color: #555; font-weight: 600; }
+  .flag { display: inline-block; background: #fdf3d7; color: #8a6d1a;
+          border: 1px solid #ecd9a0; border-radius: 4px; padding: 1px 8px;
+          margin: 2px 4px 2px 0; font-size: 12.5px; }
+  pre.cmd { background: #1e1e2e; color: #d8e2d8; padding: 8px 12px;
+            border-radius: 6px; font-size: 12.5px; overflow-x: auto;
+            margin: 4px 0; user-select: all; }
+  .quiet { color: #2e7d46; background: #eef6ee; border: 1px solid #cde5cd;
+           border-radius: 8px; padding: 12px 16px; font-size: 14px; }
+  .note { color: #888; font-size: 12.5px; margin: 6px 0; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: #555; font-size: 13.5px; }
+  .snap { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+  .snap .item { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px;
+                padding: 8px 14px; font-size: 13.5px; }
+  .snap .item .k { color: #888; font-size: 12px; display: block; }
+  footer { margin-top: 36px; padding-top: 12px; border-top: 2px solid #e0e0e0;
+           font-size: 13px; color: #a33; font-weight: 600; }
+  svg.spark { vertical-align: middle; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Alpha Miner 审视简报 — {{ report_date }}</h1>
+  <div class="meta">生成于 {{ generated_at }} · {{ gap_text }}</div>
+  <div class="summary{% if n_pending > 0 %} warn{% endif %}">
+    {{ n_pending }} 项待你处理 · 其余 {{ m_passed }} 项已自动验证放过
+  </div>
+</header>
+
+{% if db_empty %}
+<div class="banner-red">DB 为空，采集未运行 — 数据缺失，以下所有区块不可用</div>
+{% endif %}
+{% for alert in top_alerts %}
+<div class="alert-red">⚠ {{ alert }}</div>
+{% endfor %}
+
+<h2>1. 数据源健康</h2>
+{% if health.red %}
+<div class="alert-red">⚠ 存在数据缺失或滞后超过 {{ stale_threshold }} 个交易日的关键表，下方区块可信度受损</div>
+{% endif %}
+<table>
+  <tr><th></th><th>表</th><th>行数</th><th>最新数据</th><th>滞后</th></tr>
+  {% for t in health.tables %}
+  <tr class="{% if t.status == 'bad' %}bad{% elif t.status == 'warn' %}warn{% endif %}">
+    <td><span class="dot {{ t.status if t.status in ('ok','warn','bad') else 'na' }}"></span></td>
+    <td>{{ t.name }}</td>
+    <td>{{ t.rows }}</td>
+    <td>{{ t.latest }}</td>
+    <td>{{ t.lag_text }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="note">{{ health.lag_note }}</p>
+<p class="note">采集/流水线上次产出：{{ health.collect_text }}</p>
+
+{% if health.chain %}
+<details>
+  <summary>信号链路 → 数据源映射（2026-06-11 审计结论）</summary>
+  <table>
+    <tr><th>因子 / 链路</th><th>实际数据源</th><th>质量</th><th>说明</th></tr>
+    {% for c in health.chain %}
+    <tr><td>{{ c.factor }}</td><td>{{ c.source }}</td><td>{{ c.quality }}</td><td>{{ c.note }}</td></tr>
+    {% endfor %}
+  </table>
+  {% if health.news %}
+  <p class="note">news 表现状：近 10 个有数日均 {{ health.news.avg_per_day }} 条 /
+     覆盖 {{ health.news.avg_stocks }} 只股票，noise 占比 {{ health.news.noise_pct }}。
+     叙事速度因子（narrative_velocity）直接消费该表。</p>
+  {% endif %}
+</details>
+{% endif %}
+
+<h2>2. 需要你的注意</h2>
+{% if cards %}
+  {% for card in cards %}
+  <div class="card {{ card.severity }}">
+    <h3>{{ card.title }}</h3>
+    {% if card.flags %}
+    <div>{% for f in card.flags %}<span class="flag">⚑ {{ f }}</span>{% endfor %}</div>
+    {% endif %}
+    <div class="seg"><b>做了什么：</b>{{ card.what }}</div>
+    <div class="seg"><b>为什么 · 观测到什么：</b>{{ card.why }}</div>
+    <div class="seg"><b>你可以做什么：</b></div>
+    {% for cmd in card.actions %}
+    <pre class="cmd">{{ cmd }}</pre>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  {% if cards_truncated > 0 %}
+  <p class="note">另有 {{ cards_truncated }} 项超出版面截断，全部事件请用 CLI 查看。</p>
+  {% endif %}
+{% else %}
+<div class="quiet">✓ 今日无需你决策的事项</div>
+{% endif %}
+{% if drift_note %}
+<p class="note">{{ drift_note }}</p>
+{% endif %}
+
+<h2>3. 系统行为快照</h2>
+<div class="snap">
+  <div class="item"><span class="k">市场 Regime</span>{{ snapshot.regime_text }}</div>
+  <div class="item"><span class="k">存活因子</span>{{ snapshot.alive_text }}</div>
+  <div class="item"><span class="k">测试</span>{{ snapshot.pytest_text }}</div>
+  <div class="item"><span class="k">数据新鲜度</span>{{ snapshot.fresh_text }}</div>
+</div>
+{% if snapshot.factors %}
+<details>
+  <summary>各因子 IC 胜率与近 30 日走势</summary>
+  <table>
+    <tr><th>因子</th><th>胜率（窗口）</th><th>IC 点数</th><th>近 30 日 IC</th></tr>
+    {% for f in snapshot.factors %}
+    <tr><td>{{ f.name }}</td><td>{{ f.win_text }}</td><td>{{ f.points }}</td><td>{{ f.spark }}</td></tr>
+    {% endfor %}
+  </table>
+</details>
+{% endif %}
+
+<footer>仓位上限 40%（重启期）· 所有买卖信号需人工确认</footer>
+
+</body>
+</html>

@@ -18,17 +18,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # (标题, 传给 python 的参数)。{date} 会被替换为目标日期。
 STEPS = [
-    ("1/7 采集数据", ["-m", "cli.collect", "--today"]),
-    ("2/7 计算因子值", ["-m", "cli.backtest", "--compute-today"]),
-    ("2.5/7 Regime 识别", ["-c",
+    ("1/8 采集数据", ["-m", "cli.collect", "--today"]),
+    ("2/8 计算因子值", ["-m", "cli.backtest", "--compute-today"]),
+    ("2.5/8 Regime 识别", ["-c",
         "from src.data.storage import Storage; "
         "from src.pipeline.runner import run_regime_pipeline; "
         "db=Storage(); db.init_db(); run_regime_pipeline(db)"]),
-    ("3/7 漂移检测", ["-m", "cli.drift", "--date", "{date}"]),
-    ("4/7 因子进化", ["-m", "cli.mine", "evolve", "--generations", "3", "--population", "5"]),
-    ("5/7 生成日报", ["-m", "cli.report", "--date", "{date}"]),
-    ("6/7 生成市场剧本", ["-m", "cli", "script", "--date", "{date}", "--save"]),
-    ("7/7 复盘昨日剧本", ["-m", "cli", "replay", "--date", "{date}", "--save"]),
+    ("3/8 漂移检测", ["-m", "cli.drift", "--date", "{date}"]),
+    ("4/8 因子进化", ["-m", "cli.mine", "evolve", "--generations", "3", "--population", "5"]),
+    ("5/8 生成日报", ["-m", "cli.report", "--date", "{date}"]),
+    ("6/8 生成市场剧本", ["-m", "cli", "script", "--date", "{date}", "--save"]),
+    ("7/8 复盘昨日剧本", ["-m", "cli", "replay", "--date", "{date}", "--save"]),
+    ("8/8 生成审视简报", ["scripts/generate_brief.py", "--date", "{date}"]),
 ]
 
 
