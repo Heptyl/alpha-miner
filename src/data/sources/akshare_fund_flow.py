@@ -1,34 +1,28 @@
 """资金流向数据采集 — 同花顺全市场排名接口。
 
 主源: 同花顺个股资金流排名 (data.10jqka.com.cn/funds/ggzjl/)
-      一次拉全量（~5200只，约110页，1s/页 ≈ 2min）
+      4 路并发拉取全量（~5200只、约110页，通常数秒完成）
 回退: stock_individual_fund_flow (东方财富逐只，仅WAF严重时降级)
 
 同花顺接口稳定，不走东财WAF，返回：代码、名称、涨跌幅、资金流入/流出/净额、成交额。
 无超大单/大单拆分，但有主力净额（净额即主力净流入）。
 """
 
+import concurrent.futures
 import logging
 import re
-import sys
 import time
-from pathlib import Path
+from functools import lru_cache
 
 import pandas as pd
 import py_mini_racer
 import requests
+from akshare.datasets import get_ths_js
 from bs4 import BeautifulSoup
 
 from src.data.storage import Storage
 
 logger = logging.getLogger(__name__)
-
-_THS_JS_PATH = Path(__file__).resolve().parents[3] / ".venv" / "lib" / f"python3.{sys.version_info.minor}" / "site-packages" / "akshare" / "data" / "ths.js"
-if not _THS_JS_PATH.exists():
-    # Fallback: search for any python3.x in .venv/lib
-    _lib_dir = Path(__file__).resolve().parents[3] / ".venv" / "lib"
-    _found = list(_lib_dir.glob("python3.*/site-packages/akshare/data/ths.js"))
-    _THS_JS_PATH = _found[0] if _found else _THS_JS_PATH
 
 _HEADERS = {
     "User-Agent": (
@@ -41,20 +35,25 @@ _HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
-_PAGE_SIZE = 50  # 每页50只
-_PAGE_DELAY = 0.8  # 每页间隔秒数
+_MAX_WORKERS = 4  # 实测可稳定并发；继续增大容易触发同花顺限流
+
+
+@lru_cache(maxsize=1)
+def _get_ths_js_content() -> str:
+    """通过 AkShare 自己的数据定位器读取 ths.js，兼容 Windows/Linux/uv。"""
+    with open(get_ths_js("ths.js"), encoding="utf-8") as f:
+        return f.read()
 
 
 def _get_ths_v_code() -> str:
     """获取同花顺 hexin-v 验证码。"""
     js_code = py_mini_racer.MiniRacer()
-    with open(_THS_JS_PATH, encoding="utf-8") as f:
-        js_code.eval(f.read())
+    js_code.eval(_get_ths_js_content())
     return js_code.call("v")
 
 
 def _parse_amount(text: str) -> float:
-    """解析同花顺金额字符串（如 '43.72亿', '-1812.83万', '8749.41万'）为万元。"""
+    """解析同花顺金额字符串为元，与 daily_price.amount 保持同一单位。"""
     text = text.strip()
     if not text or text == "0.00" or text == "-":
         return 0.0
@@ -64,25 +63,58 @@ def _parse_amount(text: str) -> float:
     val = float(m.group(1))
     unit = m.group(2)
     if unit == "亿":
-        return val * 10000  # 转为万元
-    return val  # 已经是万元
+        return val * 100_000_000
+    if unit == "万":
+        return val * 10_000
+    return val
 
 
-def _fetch_ths_rank(trade_date: str) -> pd.DataFrame:
+def _fetch_ths_page(page: int, trade_date: str, retries: int = 3) -> list[dict]:
+    """拉取并解析一页；每次尝试生成新 hexin-v，避免令牌失效。"""
+    url = (
+        "http://data.10jqka.com.cn/funds/ggzjl/"
+        f"field/zdf/order/desc/page/{page}/ajax/1/free/1/"
+    )
+    for attempt in range(retries):
+        try:
+            headers = {**_HEADERS, "hexin-v": _get_ths_v_code()}
+            response = requests.get(url, headers=headers, timeout=(5, 15))
+            response.raise_for_status()
+            table = BeautifulSoup(response.text, features="lxml").find("table")
+            if table is None:
+                raise ValueError("响应中没有 table（可能触发反爬）")
+            rows = _parse_table(table, trade_date)
+            if not rows:
+                raise ValueError("响应 table 为空")
+            return rows
+        except Exception as exc:
+            if attempt == retries - 1:
+                logger.warning("fund_flow ths 第%d页失败: %s", page, exc)
+                return []
+            time.sleep(0.25 * (2 ** attempt))
+    return []
+
+
+def _fetch_ths_rank(
+    trade_date: str,
+    retries: int = 3,
+    max_workers: int = _MAX_WORKERS,
+) -> pd.DataFrame:
     """从同花顺拉全市场个股资金流排名。
 
     返回 DataFrame，列: stock_code, trade_date, stock_name, pct_change,
     inflow, outflow, net_amount, amount, main_net
-    金额单位：万元。
+    金额单位：元。
     """
     try:
-        v_code = _get_ths_v_code()
+        first_rows = _fetch_ths_page(1, trade_date, retries=retries)
     except Exception as e:
-        logger.warning("fund_flow: 获取 ths v_code 失败: %s", e)
+        logger.warning("fund_flow ths 第1页请求失败: %s", e)
         return pd.DataFrame()
 
-    headers = {**_HEADERS, "hexin-v": v_code}
-    all_rows = []
+    if not first_rows:
+        return pd.DataFrame()
+    all_rows = list(first_rows)
 
     # 先请求第1页获取总页数
     url_tpl = (
@@ -90,81 +122,52 @@ def _fetch_ths_rank(trade_date: str) -> pd.DataFrame:
         "field/zdf/order/desc/page/{page}/ajax/1/free/1/"
     )
 
+    # 单独请求首页响应以读取页数；失败时用市场规模估计值。
     try:
-        r = requests.get(url_tpl.format(page=1), headers=headers, timeout=15)
-        r.raise_for_status()
-    except Exception as e:
-        logger.warning("fund_flow ths 第1页请求失败: %s", e)
-        return pd.DataFrame()
-
-    soup = BeautifulSoup(r.text, features="lxml")
-    table = soup.find("table")
-    if not table:
-        logger.warning("fund_flow ths: 无数据（可能被反爬）")
-        return pd.DataFrame()
-
-    # 获取总页数
-    page_info = soup.find("span", attrs={"class": "page_info"})
-    if page_info:
-        total_pages = int(page_info.text.split("/")[1])
-    else:
-        total_pages = 110  # 默认估计
+        headers = {**_HEADERS, "hexin-v": _get_ths_v_code()}
+        response = requests.get(url_tpl.format(page=1), headers=headers, timeout=(5, 15))
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, features="lxml")
+        page_info = soup.find("span", attrs={"class": "page_info"})
+        total_pages = int(page_info.text.split("/")[1]) if page_info else 110
+    except Exception:
+        total_pages = 110
 
     logger.info("fund_flow ths: 共 %d 页", total_pages)
     max_pages = min(total_pages, 120)  # 全市场 ~5200 只（~110 页）
 
-    # 解析第1页
-    all_rows.extend(_parse_table(table, trade_date))
-
-    # 拉后续页（定期刷新 v_code 防 401）
-    for page in range(2, max_pages + 1):
-        time.sleep(_PAGE_DELAY)
-
-        # 每4页刷新一次 v_code
-        if page % 4 == 2:
+    page_rows: dict[int, list[dict]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_pages = {
+            executor.submit(_fetch_ths_page, page, trade_date, retries): page
+            for page in range(2, max_pages + 1)
+        }
+        for future in concurrent.futures.as_completed(future_pages):
+            page = future_pages[future]
             try:
-                v_code = _get_ths_v_code()
-                headers = {**_HEADERS, "hexin-v": v_code}
-            except Exception:
-                pass
+                rows = future.result()
+            except Exception as exc:
+                logger.warning("fund_flow ths 第%d页任务失败: %s", page, exc)
+                rows = []
+            if rows:
+                page_rows[page] = rows
 
-        page_retries = 0
-        while page_retries < 2:
-            try:
-                r = requests.get(url_tpl.format(page=page), headers=headers, timeout=15)
-                if r.status_code == 401:
-                    v_code = _get_ths_v_code()
-                    headers = {**_HEADERS, "hexin-v": v_code}
-                    time.sleep(1)
-                    page_retries += 1
-                    continue
-                r.raise_for_status()
-                soup = BeautifulSoup(r.text, features="lxml")
-                table = soup.find("table")
-                if not table:
-                    logger.warning("fund_flow ths 第%d页无 table", page)
-                    break
-                rows = _parse_table(table, trade_date)
-                if not rows:
-                    logger.info("fund_flow ths 第%d页空，停止", page)
-                    break
-                all_rows.extend(rows)
-                break  # 成功，跳出 retry
-            except Exception as e:
-                page_retries += 1
-                if page_retries < 2 and "401" in str(e):
-                    try:
-                        v_code = _get_ths_v_code()
-                        headers = {**_HEADERS, "hexin-v": v_code}
-                        time.sleep(1)
-                        continue
-                    except Exception:
-                        pass
-                logger.warning("fund_flow ths 第%d页失败: %s", page, e)
-                break
+    for page in sorted(page_rows):
+        all_rows.extend(page_rows[page])
 
-        if page % 20 == 0:
-            logger.info("fund_flow ths 进度: %d/%d, 累计 %d 只", page, total_pages, len(all_rows))
+    completed_pages = 1 + len(page_rows)
+    completeness = completed_pages / max_pages
+    if completeness < 0.8:
+        logger.error(
+            "fund_flow ths 完整度过低: %d/%d页 (%.1f%%)",
+            completed_pages, max_pages, completeness * 100,
+        )
+        return pd.DataFrame()
+    if completeness < 1:
+        logger.warning(
+            "fund_flow ths 部分页失败: %d/%d页 (%.1f%%)",
+            completed_pages, max_pages, completeness * 100,
+        )
 
     if not all_rows:
         return pd.DataFrame()
@@ -204,26 +207,26 @@ def _parse_table(table, trade_date: str) -> list[dict]:
     return rows
 
 
-def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
+def fetch(trade_date: str, retries: int = 3, db: Storage | None = None) -> pd.DataFrame:
     """拉取资金流向。
 
-    主源: 同花顺全市场排名（~2min 拉完）
+    主源: 同花顺全市场排名（4 路分页并发）
     """
     # 主源：同花顺
-    result = _fetch_ths_rank(trade_date)
+    result = _fetch_ths_rank(trade_date, retries=retries)
     if not result.empty:
         return result
 
     # 回退：东财逐只（可能被 WAF）
     logger.warning("fund_flow: 同花顺失败，回退东财逐只")
-    return _fetch_em_fallback(trade_date)
+    return _fetch_em_fallback(trade_date, db=db)
 
 
-def _fetch_em_fallback(trade_date: str) -> pd.DataFrame:
+def _fetch_em_fallback(trade_date: str, db: Storage | None = None) -> pd.DataFrame:
     """回退：东财逐只资金流（只拉涨停+龙虎榜，限流更严）。"""
     import akshare as ak
 
-    codes = _get_priority_codes(trade_date)
+    codes = _get_priority_codes(trade_date, db=db)
     if not codes:
         return pd.DataFrame()
 
@@ -268,11 +271,11 @@ def _fetch_em_fallback(trade_date: str) -> pd.DataFrame:
     return pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
 
-def _get_priority_codes(trade_date: str) -> list[str]:
+def _get_priority_codes(trade_date: str, db: Storage | None = None) -> list[str]:
     """从 DB 获取当日涨停+龙虎榜的股票代码。"""
     try:
-        db = Storage()
-        conn = db._get_conn()
+        source_db = db or Storage()
+        conn = source_db._get_conn()
         codes = []
         for table in ["zt_pool", "lhb_detail"]:
             try:

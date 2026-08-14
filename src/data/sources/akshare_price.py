@@ -10,12 +10,14 @@ backfill 模式:
 """
 
 import logging
+import os
 import time
-from datetime import datetime
 
 import akshare as ak
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from src.data.storage import Storage
 
@@ -34,7 +36,7 @@ _TENCENT_FIELD_MAP = {
     5: "open",        # 今开
     33: "high",       # 最高
     34: "low",        # 最低
-    37: "volume",     # 成交量(手)
+    36: "volume",     # 成交量(手); 37 是成交额(万元)，不能混用
     38: "turnover_rate",  # 换手率(%)
 }
 
@@ -59,63 +61,98 @@ def _code_from_tencent(tc: str) -> str:
     return tc[2:]
 
 
-def _fetch_tencent_batch(codes: list[str], batch_size: int = 800) -> pd.DataFrame:
+def _direct_session(retries: int = 3) -> requests.Session:
+    """创建不继承系统代理的腾讯行情会话，并启用连接级重试。
+
+    国内行情直连通常比经过开发机代理更稳定。只让这个 Session 绕过代理，
+    避免旧实现临时删除全进程代理环境变量所带来的并发竞态。
+    """
+    session = requests.Session()
+    use_proxy = os.getenv("ALPHA_MINER_USE_PROXY", "").strip().lower()
+    session.trust_env = use_proxy in {"1", "true", "yes", "on"}
+    retry = Retry(
+        total=max(0, retries - 1),
+        connect=max(0, retries - 1),
+        read=max(0, retries - 1),
+        backoff_factor=0.3,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8))
+    return session
+
+
+def _fetch_tencent_batch(
+    codes: list[str],
+    batch_size: int = 800,
+    retries: int = 3,
+) -> pd.DataFrame:
     """从腾讯行情接口批量获取实时数据。
 
     qt.gtimg.cn 一次最多约 800 只，超过则分批。
     """
     all_rows = []
+    session = _direct_session(retries)
 
-    for i in range(0, len(codes), batch_size):
-        batch = [_code_to_tencent(c) for c in codes[i:i + batch_size]]
-        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+    try:
+        for i in range(0, len(codes), batch_size):
+            batch = [_code_to_tencent(c) for c in codes[i:i + batch_size]]
+            url = "https://qt.gtimg.cn/q=" + ",".join(batch)
 
-        try:
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code != 200:
-                logger.warning("腾讯行情 HTTP %d", r.status_code)
+            try:
+                r = session.get(url, timeout=(5, 15), headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+
+                for line in r.text.strip().split(";"):
+                    line = line.strip()
+                    if not line or "~" not in line:
+                        continue
+                    parts = line.split("~")
+                    if len(parts) < 40:
+                        continue
+
+                    # 提取代码: v_sh600519="1 → 600519
+                    raw_code = parts[0]
+                    if "_" in raw_code:
+                        tc_code = raw_code.split("_")[1].split("=")[0] if "=" in raw_code else ""
+                        stock_code = _code_from_tencent(tc_code) if len(tc_code) > 2 else ""
+                    else:
+                        stock_code = ""
+
+                    if not stock_code:
+                        continue
+
+                    row = {"stock_code": stock_code}
+                    try:
+                        for idx, col in _TENCENT_FIELD_MAP.items():
+                            val = parts[idx] if idx < len(parts) else ""
+                            row[col] = float(val) if val else None
+                    except (ValueError, IndexError):
+                        continue
+
+                    # 行情时间用于防止把节假日/历史请求错误标成今天。
+                    quote_time = parts[30] if len(parts) > 30 else ""
+                    row["_quote_date"] = (
+                        f"{quote_time[:4]}-{quote_time[4:6]}-{quote_time[6:8]}"
+                        if len(quote_time) >= 8 and quote_time[:8].isdigit()
+                        else ""
+                    )
+
+                    # 成交额: 从 [35] 解析 (价格/成交量/成交额元)
+                    try:
+                        amt_str = parts[35] if len(parts) > 35 else ""
+                        amt_parts = amt_str.split("/")
+                        row["amount"] = float(amt_parts[2]) if len(amt_parts) > 2 else None
+                    except (ValueError, IndexError):
+                        row["amount"] = None
+
+                    all_rows.append(row)
+
+            except Exception as e:
+                logger.warning("腾讯行情批次 %d 失败: %s", i // batch_size + 1, e)
                 continue
-
-            for line in r.text.strip().split(";"):
-                line = line.strip()
-                if not line or "~" not in line:
-                    continue
-                parts = line.split("~")
-                if len(parts) < 40:
-                    continue
-
-                # 提取代码: v_sh600519="1 → 600519
-                raw_code = parts[0]
-                if "_" in raw_code:
-                    tc_code = raw_code.split("_")[1].split("=")[0] if "=" in raw_code else ""
-                    stock_code = _code_from_tencent(tc_code) if len(tc_code) > 2 else ""
-                else:
-                    stock_code = ""
-
-                if not stock_code:
-                    continue
-
-                row = {"stock_code": stock_code}
-                try:
-                    for idx, col in _TENCENT_FIELD_MAP.items():
-                        val = parts[idx] if idx < len(parts) else ""
-                        row[col] = float(val) if val else None
-                except (ValueError, IndexError):
-                    continue
-
-                # 成交额: 从 [35] 解析 (1410.89/36451/5127146041)
-                try:
-                    amt_str = parts[35] if len(parts) > 35 else ""
-                    amt_parts = amt_str.split("/")
-                    row["amount"] = float(amt_parts[2]) if len(amt_parts) > 2 else None
-                except (ValueError, IndexError):
-                    row["amount"] = None
-
-                all_rows.append(row)
-
-        except Exception as e:
-            logger.warning("腾讯行情批次 %d 失败: %s", i // batch_size, e)
-            continue
+    finally:
+        session.close()
 
     if not all_rows:
         return pd.DataFrame()
@@ -123,15 +160,15 @@ def _fetch_tencent_batch(codes: list[str], batch_size: int = 800) -> pd.DataFram
     return pd.DataFrame(all_rows)
 
 
-def _fetch_tencent_full(trade_date: str) -> pd.DataFrame:
+def _fetch_tencent_full(trade_date: str, db: Storage | None = None) -> pd.DataFrame:
     """腾讯行情: 优先从 DB 获取代码列表，再批量拉行情."""
     codes = []
 
     # 优先从 DB 已有表获取代码
     try:
-        db = Storage()
-        db.init_db()
-        conn = db._get_conn()
+        source_db = db or Storage()
+        source_db.init_db()
+        conn = source_db._get_conn()
         codes = [r[0] for r in conn.execute(
             "SELECT DISTINCT stock_code FROM daily_price "
             "UNION SELECT DISTINCT stock_code FROM zt_pool "
@@ -144,12 +181,12 @@ def _fetch_tencent_full(trade_date: str) -> pd.DataFrame:
     except Exception as e:
         logger.warning("DB 获取代码失败: %s", e)
 
-    # 回退: 尝试 akshare stock_info_a_code_name
-    if not codes:
+    # 新库通常只有当日涨停/强势池的几百只代码；不足 1000 时补全市场。
+    if len(codes) < 1000:
         try:
             info_df = ak.stock_info_a_code_name()
             if info_df is not None and not info_df.empty:
-                codes = info_df["code"].tolist()
+                codes = list(dict.fromkeys(codes + info_df["code"].astype(str).tolist()))
                 logger.info("从 stock_info 获取 %d 只 A 股代码", len(codes))
         except Exception as e:
             logger.warning("stock_info_a_code_name 失败: %s", e)
@@ -162,6 +199,17 @@ def _fetch_tencent_full(trade_date: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    if "_quote_date" in df.columns:
+        same_day = df["_quote_date"] == trade_date
+        if not same_day.any():
+            actual_dates = sorted(d for d in df["_quote_date"].dropna().unique() if d)
+            logger.warning("腾讯行情日期不匹配: 请求=%s, 实际=%s", trade_date, actual_dates[-3:])
+            return pd.DataFrame()
+        stale_count = int((~same_day).sum())
+        if stale_count:
+            logger.info("腾讯行情过滤 %d 只停牌/旧快照股票", stale_count)
+        df = df.loc[same_day].drop(columns=["_quote_date"])
+
     df["trade_date"] = trade_date
     df = df.dropna(subset=["close"])
     df = df[df["close"] > 0]
@@ -169,28 +217,7 @@ def _fetch_tencent_full(trade_date: str) -> pd.DataFrame:
     return df
 
 
-def _clear_proxy() -> dict:
-    """清除代理环境变量（WSL2 Clash 会拦截腾讯/东财国内接口），返回旧值以便恢复。"""
-    import os
-    old = {}
-    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
-              "all_proxy", "ALL_PROXY"):
-        v = os.environ.pop(k, None)
-        if v is not None:
-            old[k] = v
-    if old:
-        logger.info("已清除代理变量: %s", list(old.keys()))
-    return old
-
-
-def _restore_proxy(old: dict) -> None:
-    """恢复代理环境变量。"""
-    import os
-    for k, v in old.items():
-        os.environ[k] = v
-
-
-def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
+def fetch(trade_date: str, retries: int = 3, db: Storage | None = None) -> pd.DataFrame:
     """拉取日K线 — 始终走腾讯全量。
 
     腾讯行情 qt.gtimg.cn 实测 5200+ 只 / ~1.5s，稳定可靠。
@@ -198,44 +225,39 @@ def fetch(trade_date: str, retries: int = 3) -> pd.DataFrame:
 
     策略：腾讯全量 → 失败回退 stock_zh_a_daily（逐只，慢但稳）
     """
-    old_proxy = _clear_proxy()
+    # 主路径：腾讯全量（~1.5s 拉完 5200+ 只）
+    logger.info("fetch(%s): 腾讯全量模式", trade_date)
+    result = _fetch_tencent_full(trade_date, db=db)
+    if not result.empty:
+        return result
 
-    try:
-        # 主路径：腾讯全量（~1.5s 拉完 5200+ 只）
-        logger.info("fetch(%s): 腾讯全量模式", trade_date)
-        result = _fetch_tencent_full(trade_date)
-        if not result.empty:
-            return result
+    # 回退：stock_zh_a_daily 全量（慢，逐只拉取）
+    logger.warning("腾讯全量失败，回退 stock_zh_a_daily 全量")
+    result = _fetch_daily_ak(trade_date, retries, multi_thread=True, db=db)
+    if not result.empty:
+        return result
 
-        # 回退：stock_zh_a_daily 全量（慢，逐只拉取）
-        logger.warning("腾讯全量失败，回退 stock_zh_a_daily 全量")
-        result = _fetch_daily_ak(trade_date, retries, multi_thread=True)
-        if not result.empty:
-            return result
-
-        logger.error("所有数据源均失败")
-        return pd.DataFrame()
-    finally:
-        _restore_proxy(old_proxy)
+    logger.error("所有数据源均失败")
+    return pd.DataFrame()
 
 
-def fetch_today(trade_date: str, retries: int = 3) -> pd.DataFrame:
+def fetch_today(trade_date: str, retries: int = 3, db: Storage | None = None) -> pd.DataFrame:
     """拉取当日实时行情快照 — 只拉重点股票。"""
-    return fetch(trade_date, retries=retries)
+    return fetch(trade_date, retries=retries, db=db)
 
 
-def fetch_history(trade_date: str, retries: int = 3) -> pd.DataFrame:
+def fetch_history(trade_date: str, retries: int = 3, db: Storage | None = None) -> pd.DataFrame:
     """拉取历史日K线 (backfill) — 优先东财 stock_zh_a_hist，回退 stock_zh_a_daily.
 
     多线程加速，带限流 + 指数退避 + 连续失败检测。
     """
     # 优先东财源（stock_zh_a_hist，稳定可用）
-    result = _fetch_hist_eastmoney(trade_date, retries)
+    result = _fetch_hist_eastmoney(trade_date, retries, db=db)
     if not result.empty:
         return result
     # 回退新浪源
     logger.warning("stock_zh_a_hist 全部失败，回退 stock_zh_a_daily")
-    return _fetch_daily_ak(trade_date, retries, multi_thread=True)
+    return _fetch_daily_ak(trade_date, retries, multi_thread=True, db=db)
 
 
 def _get_priority_codes(trade_date: str) -> list[str]:
@@ -336,13 +358,13 @@ def _fetch_daily_ak_subset(trade_date: str, codes: list[str], max_retries: int =
     return pd.DataFrame()
 
 
-def _get_stock_codes() -> list[str]:
+def _get_stock_codes(db: Storage | None = None) -> list[str]:
     """获取股票代码列表 — 优先 DB，回退 akshare."""
     codes = []
     try:
-        db = Storage()
-        db.init_db()
-        conn = db._get_conn()
+        source_db = db or Storage()
+        source_db.init_db()
+        conn = source_db._get_conn()
         codes = [r[0] for r in conn.execute(
             "SELECT DISTINCT stock_code FROM daily_price"
         ).fetchall()]
@@ -364,7 +386,12 @@ def _get_stock_codes() -> list[str]:
     return codes
 
 
-def _fetch_daily_ak(trade_date: str, max_retries: int = 3, multi_thread: bool = False) -> pd.DataFrame:
+def _fetch_daily_ak(
+    trade_date: str,
+    max_retries: int = 3,
+    multi_thread: bool = False,
+    db: Storage | None = None,
+) -> pd.DataFrame:
     """用 stock_zh_a_daily 逐只拉取日K线（新浪源，稳定可用）。
 
     多线程模式用于 backfill，单线程模式用于日常采集。
@@ -372,7 +399,7 @@ def _fetch_daily_ak(trade_date: str, max_retries: int = 3, multi_thread: bool = 
     import concurrent.futures
     import threading
 
-    codes = _get_stock_codes()
+    codes = _get_stock_codes(db=db)
     if not codes:
         logger.error("_fetch_daily_ak: 无可用股票代码")
         return pd.DataFrame()
@@ -480,7 +507,11 @@ def _fetch_daily_ak(trade_date: str, max_retries: int = 3, multi_thread: bool = 
     return pd.DataFrame()
 
 
-def _fetch_hist_eastmoney(trade_date: str, max_retries: int = 3) -> pd.DataFrame:
+def _fetch_hist_eastmoney(
+    trade_date: str,
+    max_retries: int = 3,
+    db: Storage | None = None,
+) -> pd.DataFrame:
     """用 stock_zh_a_hist（东方财富源）逐只拉取日K线。
 
     东财源比新浪源稳定，在国内网络环境下可用性更高。
@@ -489,7 +520,7 @@ def _fetch_hist_eastmoney(trade_date: str, max_retries: int = 3) -> pd.DataFrame
     import concurrent.futures
     import threading
 
-    codes = _get_stock_codes()
+    codes = _get_stock_codes(db=db)
     if not codes:
         logger.error("_fetch_hist_eastmoney: 无可用股票代码")
         return pd.DataFrame()
@@ -576,4 +607,4 @@ def save(df: pd.DataFrame, db: Storage, dedup: bool = False) -> int:
     """将行情数据写入数据库。"""
     if df.empty:
         return 0
-    return db.insert("daily_price", df, dedup=dedup)
+    return db.insert("daily_price", df.drop(columns=["_quote_date"], errors="ignore"), dedup=dedup)
