@@ -63,9 +63,18 @@ uv run python -m cli zt scan
 
 4. 生成实际观察/操作卡：
 
+   本地挖掘后：
+
    ```powershell
    uv run python -m cli zt status
    uv run python -m cli zt scan
+   ```
+
+   服务器挖掘后，状态文件留在服务器映射盘，需要明确指定：
+
+   ```powershell
+   uv run python -m cli zt status --state X:\alpha-miner\data\limit_up_evolution.json
+   uv run python -m cli zt scan --state X:\alpha-miner\data\limit_up_evolution.json
    ```
 
 当前只有 16 个可用信号日，低于 40 日门槛。现在可以运行挖掘观察系统行为，但继续增加代数
