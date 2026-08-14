@@ -17,6 +17,7 @@ recommendations/
 
 # 敏感配置
 config/settings.yaml
+config/remote.local.ps1
 
 # 开发工具
 .claude/

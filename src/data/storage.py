@@ -41,6 +41,11 @@ class Storage:
                 "ALTER TABLE daily_price ADD COLUMN pre_close REAL",
                 "ALTER TABLE zt_pool ADD COLUMN name TEXT DEFAULT ''",
                 "ALTER TABLE zt_pool ADD COLUMN industry TEXT DEFAULT ''",
+                "ALTER TABLE zt_pool ADD COLUMN total_mv REAL",
+                "ALTER TABLE zt_pool ADD COLUMN turnover_rate REAL",
+                "ALTER TABLE zt_pool ADD COLUMN seal_amount REAL",
+                "ALTER TABLE zt_pool ADD COLUMN first_seal_time TEXT DEFAULT ''",
+                "ALTER TABLE zt_pool ADD COLUMN last_seal_time TEXT DEFAULT ''",
                 "ALTER TABLE strong_pool ADD COLUMN name TEXT DEFAULT ''",
                 "ALTER TABLE strong_pool ADD COLUMN industry TEXT DEFAULT ''",
             ]:

@@ -43,6 +43,9 @@ if __name__ == "__main__":
     elif sub == "strategy":
         from cli.strategy import main
         main()
+    elif sub in ("limit-up", "zt"):
+        from cli.limit_up import main
+        main()
     elif sub == "signal":
         from cli.signal import main
         main()
@@ -64,6 +67,7 @@ if __name__ == "__main__":
         print("  script    生成市场剧本")
         print("  replay    复盘昨日剧本")
         print("  strategy  策略管理 (list/backtest/evolve/scan)")
+        print("  limit-up 涨停板因子进化与次日操作卡")
         print("  signal    次日选股信号")
         print("  recommend 每日个股推荐(含买入点位)")
         print("  query     查询股票数据/市场概览")

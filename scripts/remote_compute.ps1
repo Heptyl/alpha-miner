@@ -1,15 +1,25 @@
 param(
-    [ValidateSet('sync', 'build', 'collect', 'evolve', 'daily', 'snapshot', 'publish-data', 'status')]
+    [ValidateSet('sync', 'build', 'collect', 'evolve', 'evolve-limit-up', 'daily', 'snapshot', 'publish-data', 'status')]
     [string]$Action = 'status',
-    [string]$SshTarget = 'leigeng@192.168.21.67',
+    [string]$SshTarget = '',
     [string]$MappedRoot = 'X:\alpha-miner',
-    [string]$RemoteRoot = '/home/diskc/leigeng/alpha-miner',
+    [string]$RemoteRoot = '',
     [string]$LocalDb = 'data\alpha_miner.db',
     [switch]$SeedData
 )
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$RemoteConfig = Join-Path $ProjectRoot 'config\remote.local.ps1'
+if (Test-Path $RemoteConfig) {
+    . $RemoteConfig
+}
+if ([string]::IsNullOrWhiteSpace($SshTarget)) {
+    $SshTarget = $env:ALPHA_MINER_SSH_TARGET
+}
+if ([string]::IsNullOrWhiteSpace($RemoteRoot)) {
+    $RemoteRoot = $env:ALPHA_MINER_REMOTE_ROOT
+}
 $MappedParent = Split-Path -Parent $MappedRoot
 $ResolvedParent = (Resolve-Path $MappedParent).Path
 if (-not $MappedRoot.StartsWith($ResolvedParent, [StringComparison]::OrdinalIgnoreCase)) {
@@ -18,13 +28,18 @@ if (-not $MappedRoot.StartsWith($ResolvedParent, [StringComparison]::OrdinalIgno
 
 function Sync-Code {
     New-Item -ItemType Directory -Path $MappedRoot -Force | Out-Null
-    $excludeDirs = @(
+    $excludeNames = @(
         '.git', '.venv', '.pytest_cache', '.uvtmp', '.uv_tmp',
         '.server-runtime', '__pycache__', 'logs', 'reports', 'signals', 'recommendations'
     )
     if (-not $SeedData) {
-        $excludeDirs += 'data'
+        $excludeNames += 'data'
     }
+    # /XD treats a bare name such as "data" as a match at every depth, which
+    # accidentally excluded src/data and left the server on stale schema code.
+    # Anchor every exclusion to the project root so only runtime directories
+    # are skipped.
+    $excludeDirs = $excludeNames | ForEach-Object { Join-Path $ProjectRoot $_ }
     $copyArgs = @($ProjectRoot, $MappedRoot, '/E', '/R:2', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD')
     $copyArgs += $excludeDirs
     & robocopy @copyArgs
@@ -96,6 +111,10 @@ if ($Action -eq 'sync') {
     exit 0
 }
 
+if ([string]::IsNullOrWhiteSpace($SshTarget) -or [string]::IsNullOrWhiteSpace($RemoteRoot)) {
+    throw 'Remote settings missing. Copy config/remote.example.ps1 to config/remote.local.ps1 and edit it.'
+}
+
 if (-not (Test-Path (Join-Path $MappedRoot 'scripts\server_run.sh'))) {
     Sync-Code
 }
@@ -121,6 +140,7 @@ $remoteAction = switch ($Action) {
     'build' { 'build' }
     'collect' { 'collect' }
     'evolve' { 'evolve' }
+    'evolve-limit-up' { 'evolve-limit-up' }
     'daily' { 'daily' }
     'snapshot' { 'snapshot' }
     'publish-data' { 'activate-data' }

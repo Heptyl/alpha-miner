@@ -69,6 +69,51 @@ factors:
       quant_led 环境下 67.0%/+8.67%，hot_money_led 环境下仅 40.4%/-0.86%，
       使用时必须看定价权 regime。近段(30日)胜率曾跌破两段门，注意时效。
 
+  zt_seal_strength:
+    cn: 封板质量
+    category: formula
+    desc: 封单、封板稳定度与开板风险的综合质量
+    detail: >-
+      涨停事件级因子。综合封单/流通市值、首次封板时间、炸板次数与成交活跃度，
+      取值越高表示封板更早、更稳、封单承接更强。只用于 T0 收盘后筛选，
+      次日仍须满足可成交开盘条件。数据源：zt_pool + daily_price。
+
+  zt_relay_quality:
+    cn: 接力质量
+    category: formula
+    desc: 连板高度、封板稳定与换手质量的接力结构
+    detail: >-
+      涨停事件级因子。不是简单追逐最高板，而是将连板高度与封板稳定、
+      适中换手、封单比例和开板风险联合评分。分数高仅代表进入候选排序，
+      不能绕过次日开盘涨幅与一字板过滤。数据源：zt_pool + daily_price。
+
+  zt_sector_breadth:
+    cn: 板块扩散
+    category: formula
+    desc: 同行业涨停家数与占比，衡量板块共振
+    detail: >-
+      涨停事件级因子。统计同一行业当日涨停家数及其在涨停池中的占比，
+      用于区分孤立涨停和板块扩散。当前使用行业字段，后续概念映射完整后可扩展为题材宽度。
+      数据源：zt_pool。
+
+  zt_capital_confirmation:
+    cn: 资金确认
+    category: formula
+    desc: 主力净流入与封单承接对涨停的共同确认
+    detail: >-
+      涨停事件级因子。把主力净流入强度、封单比例和流动性合成为资金确认分，
+      用来降低纯价格涨停但缺少资金承接的候选排序。资金流缺失时不会伪造确认信号。
+      数据源：zt_pool + fund_flow + daily_price。
+
+  zt_break_risk:
+    cn: 开板风险
+    category: formula
+    desc: 炸板次数、晚封和封单不足构成的否决项
+    detail: >-
+      涨停事件级风险因子，方向与收益因子相反。炸板越多、首次封板越晚、
+      封单相对流通盘越小，风险值越高。role=filter，只用于降权或直接 AVOID，
+      不作为预期收益来源。数据源：zt_pool。
+
   # ---------------- 叙事因子 ----------------
   theme_lifecycle:
     cn: 题材生命

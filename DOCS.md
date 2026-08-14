@@ -7,12 +7,13 @@ README 的补充文档，涵盖完整架构细节、配置说明和技术实现�
 ```
 alpha-miner/
 ├── cli/                    # CLI 入口 (python -m cli <command>)
-│   ├── __main__.py         #   子命令路由 (collect/report/mine/drift/backtest/script/replay/strategy)
+│   ├── __main__.py         #   子命令路由（含 limit-up/zt 用户入口）
 │   ├── collect.py          #   数据采集 (--today / --backfill N)
 │   ├── report.py           #   日报 + 盘后决策简报 (--brief) + 市场剧本
 │   ├── mine.py             #   因子进化挖掘 (LLM 驱动)
 │   ├── drift.py            #   漂移检测
 │   ├── backtest.py         #   单因子回测
+│   ├── limit_up.py         #   涨停数据补齐/结构进化/操作卡/状态
 │   ├── replay.py           #   复盘引擎 CLI
 │   ├── strategy.py         #   策略管理 (list/backtest/evolve/scan)
 │   ├── signal.py           #   选股信号
@@ -31,15 +32,16 @@ alpha-miner/
 │   │       ├── akshare_fund_flow.py   #  资金流向 (同花顺全市场排名)
 │   │       ├── akshare_concept.py     #  概念板块映射 + 日聚合
 │   │       └── akshare_news.py        #  新闻 + 金融情感引擎 + 自动分类
-│   ├── factors/            # 因子库 (9 因子)
+│   ├── factors/            # 因子库 (14 因子)
 │   │   ├── base.py         #   BaseFactor / ConditionalFactor / CrossFactor
 │   │   ├── registry.py     #   FactorRegistry 自动扫描注册
-│   │   ├── formula/        #   公式因子 (5)
+│   │   ├── formula/        #   公式因子 (10)
 │   │   │   ├── zt_ratio.py              # 涨停/(涨停+跌停)
 │   │   │   ├── consecutive_board.py     # 连板数 × (1 - 开板率)
 │   │   │   ├── main_flow_intensity.py   # 主力净流入 / 成交额
 │   │   │   ├── turnover_rank.py         # 换手率百分位排名
-│   │   │   └── lhb_institution.py       # 龙虎榜机构净买入额
+│   │   │   ├── lhb_institution.py       # 龙虎榜机构净买入额
+│   │   │   └── limit_up.py              # 5 个涨停结构因子
 │   │   └── narrative/      #   叙事因子 (4)
 │   │       ├── theme_lifecycle.py       # 题材生命周期
 │   │       ├── narrative_velocity.py    # 新闻类型加权 3 日变化率
@@ -62,6 +64,7 @@ alpha-miner/
 │   │   └── report.py       #   漂移报告汇总
 │   ├── mining/             # 进化引擎 v2
 │   │   ├── evolution.py    #   EvolutionEngine: 假说→回测→手术台→验收/变异
+│   │   ├── limit_up_evolution.py # 涨停事件→可成交标签→结构进化→操作卡
 │   │   ├── backtester.py   #   FactorBacktester: 真实逐日 Spearman IC 回测
 │   │   ├── surgery_table.py#   FactorSurgeryTable: 三分段诊断 + 黄金窗口
 │   │   ├── failure_analyzer.py #  失败因子诊断 (整合手术台)
@@ -104,14 +107,14 @@ alpha-miner/
 │   ├── server_run.sh       #   服务器 Docker/离线 Python 统一入口
 │   ├── publish_data.py     #   SQLite backup 一致性上传
 │   └── activate_data.py    #   校验、保留上一版、原子激活
-├── tests/                  # 394 tests
+├── tests/                  # 404 passed + 2 skipped
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
 ## 远程计算架构
 
-目标服务器为 `leigeng@192.168.21.67`，工作区为
-`/home/diskc/leigeng/alpha-miner`（Windows 映射为 `X:\alpha-miner`）。服务器有 256 个
+目标服务器和工作区由 Git 忽略的 `config/remote.local.ps1` 指定（Windows 映射为
+`X:\alpha-miner`）。当前计算服务器有 256 个
 CPU、约 503 GiB 内存，适合并行候选回测；磁盘当前使用率较高，因此不复制无界中间结果。
 
 ### 数据流与职责
@@ -137,6 +140,8 @@ CPU、约 503 GiB 内存，适合并行候选回测；磁盘当前使用率较�
 ```
 
 - SQLite/WAL 始终在服务器本地路径运行，不能把 `X:` 上的活动数据库交给 Windows 直接打开。
+- Windows 同步的排除目录使用项目根绝对路径；禁止把裸 `data` 传给 robocopy `/XD`，否则会连
+  `src/data` 源码一起排除，造成远端 schema 与计算代码版本不一致。
 - `publish-data` 使用 SQLite backup API 生成一致副本；服务器先 `quick_check`，再原子切换，
   原运行库保存为 `data/alpha_miner.previous.db`。
 - `snapshot` 同样使用 SQLite backup API，Windows 只读
@@ -147,6 +152,9 @@ CPU、约 503 GiB 内存，适合并行候选回测；磁盘当前使用率较�
 ### 操作命令
 
 ```powershell
+# 首次配置私有 SSH 用户、地址和远程目录
+Copy-Item config\remote.example.ps1 config\remote.local.ps1
+
 # 首次部署
 .\scripts\remote_compute.ps1 -Action sync -SeedData
 .\scripts\remote_compute.ps1 -Action build
@@ -160,12 +168,16 @@ uv run python -m cli collect --today
 
 # 远程并行进化与一致性快照
 .\scripts\remote_compute.ps1 -Action evolve
+.\scripts\remote_compute.ps1 -Action evolve-limit-up
 .\scripts\remote_compute.ps1 -Action snapshot
 ```
 
 服务器若通过代理访问行情源，应设置标准 `HTTP_PROXY`/`HTTPS_PROXY`；腾讯采集会话还需
 `ALPHA_MINER_USE_PROXY=1`。默认远程进化为 10 代、每代 16 个候选、16 workers，可通过
 `ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、`ALPHA_MINER_WORKERS` 调整。
+
+`evolve-limit-up` 使用同一组 generations/population 环境变量，默认 5 代 × 24 候选；
+该专项是 NumPy/Pandas 事件回测，当前数据规模下计算量很小，放在服务器主要是为了后续扩大历史样本和种群。
 
 ### 数据采集性能与正确性
 
@@ -213,6 +225,67 @@ uv run python -m cli collect --today
 ### leader_clarity (股票级)
 
 题材内龙头成交额 / 第二名成交额。龙头辨识度越清晰，题材持续性越好。
+
+## 涨停板因子与操作子系统
+
+### 为什么不能把“因子高”直接翻译成买入
+
+因子只回答“这个涨停事件具有什么结构”，并不回答次日能否成交、何时退出和承担多少风险。
+专项链路把这些职责拆开，任何一层缺失都不会发出买入动作：
+
+```text
+T0 盘后事件池
+  → 因子结构评分与当日横截面排序
+  → T1 开盘可成交过滤
+  → T2/T3 收盘收益标签（A 股 T+1）
+  → 训练 60% / 验证 20% / 锁定测试 20%
+  → 样本量、三段正收益、测试胜率、盈亏比闸门
+  → CONDITIONAL_BUY / WATCH_ONLY / AVOID + 入场/退出/仓位
+```
+
+### 原始字段与结构因子
+
+涨停池新增并保留 `total_mv`、`turnover_rate`、`seal_amount`、`first_seal_time`、
+`last_seal_time`。加上已有的连板数、炸板次数、流通市值、行业和成交额，构成以下 5 个注册因子：
+
+| 因子 | 主要结构 | 用法 |
+|------|----------|------|
+| zt_seal_strength | 封单/流通盘、首次封板、炸板稳定 | 候选排序 |
+| zt_relay_quality | 连板、封板、适中换手、板块、资金、风险 | 候选排序 |
+| zt_sector_breadth | 同行业涨停家数，5 家封顶 | 板块共振确认 |
+| zt_capital_confirmation | 主力净流入/成交额 | 资金确认 |
+| zt_break_risk | 炸板、晚封、封单不足 | filter；高风险直接 AVOID |
+
+`zt_pool` 只包含已涨停股票，所以这些是“事件池内排序因子”，不能拿去和全市场普通股票混排。
+
+### 专项结构进化
+
+`LimitUpGenome` 不只是给基础因子换名字。一个候选同时演化：10 个结构基因权重、适用板数、
+最大炸板次数、次日可接受开盘涨幅、持有 1/2 个完整交易日和每日 Top N。CLI 会直接显示
+主导公式，例如“封板稳定×0.23 + 板块扩散×0.18 - 开板风险×0.21”，便于人工审视。
+
+选优只看训练与验证段，最后 20% 测试段不参与繁殖；测试段只用于最终准入。默认硬门槛：
+
+- 至少 40 个可用信号日；
+- train/validation/test 至少 30/10/10 笔；
+- 三段平均收益都为正；
+- 锁定测试胜率至少 52%，盈亏比至少 1.05。
+
+命令：
+
+```powershell
+# 维护者：补齐可获得的涨停结构字段并重新进化
+uv run python -m cli zt enrich --min-market-rows 100
+uv run python -m cli zt evolve --generations 5 --population 24
+
+# 使用者：盘后一次完成更新、计算与操作卡
+uv run python -m cli zt daily
+uv run python -m cli zt status
+uv run python -m cli zt scan
+```
+
+东方财富涨停池接口通常只能稳定返回当前交易日，不能把参数日期当作可靠历史源。
+因此持续的每日采集比事后回填更重要；数据不足时系统保持 0 仓位是设计行为，不是 CLI 故障。
 
 ## 叙事引擎
 
@@ -595,7 +668,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试 (394 tests)
+## 测试（404 passed + 2 skipped）
 
 ### 硬断言测试 (47 个)
 
@@ -617,12 +690,13 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | test_evolution_integrity | 进化完整性：阈值非零、IC=0 拒绝、知识库加载 (5 tests) |
 | test_continuous_evolution | 失败者进下一代、checkpoint 续跑、空种群复苏、可执行变异 |
 | test_data_fetch_optimization | 行情字段/日期、金额单位、采集并发、历史隔离、代理开关 |
+| test_limit_up_evolution | 涨停结构特征、T1 开盘/T+1 标签、样本惩罚、操作闸门 |
 
 ### 其他测试文件
 
 | 测试文件 | 覆盖 |
 |----------|------|
-| test_formula_factors | 5 个公式因子计算 |
+| test_formula_factors | 基础公式因子计算 |
 | test_narrative_factors | 4 个叙事因子 |
 | test_storage | Storage 时间隔离 |
 | test_time_isolation | 时间隔离完整性 |
@@ -648,7 +722,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 - **validate_no_future**: `publish_time` 含时分秒与 `as_of` 日期字符串比较误报 → 截取前10字符
 - **_sandbox_runner ICIR**: IC 标准差为 0 时返回 0.0 导致验收失败 → 返回 999.0
 - **回测时间隔离**: sandbox 用 snapshot_time 导致回测数据为空 → 新增 BacktestStorage 改用 trade_date
-- **涨停因子字段**: seal_times/open_times/seal_amount 不存在 → 改用 open_count/amount
+- **涨停结构字段**：早期 schema 缺少封单/封板时间 → 新增字段与兼容迁移，采集器保留 AkShare 原始口径
 
 ## 技术要点
 

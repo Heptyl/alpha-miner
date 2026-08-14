@@ -73,6 +73,14 @@ case "$ACTION" in
       --workers "$workers" \
       "$@"
     ;;
+  evolve-limit-up)
+    generations="${ALPHA_MINER_GENERATIONS:-5}"
+    population="${ALPHA_MINER_POPULATION:-24}"
+    run_python -m cli.limit_up evolve \
+      --generations "$generations" \
+      --population "$population" \
+      "$@"
+    ;;
   daily)
     workers="${ALPHA_MINER_WORKERS:-16}"
     run_python -m cli daily --evolution-workers "$workers" "$@"
@@ -106,7 +114,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "usage: $0 {build|collect|evolve|daily|snapshot|activate-data|test|python|status} [args...]" >&2
+    echo "usage: $0 {build|collect|evolve|evolve-limit-up|daily|snapshot|activate-data|test|python|status} [args...]" >&2
     exit 2
     ;;
 esac

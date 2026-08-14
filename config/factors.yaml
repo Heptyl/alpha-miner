@@ -42,6 +42,46 @@ formula_factors:
     role: alpha
     lookback_days: 1
 
+  - name: zt_seal_strength
+    class: LimitUpSealStrengthFactor
+    module: src.factors.formula.limit_up
+    description: "封板资金+炸板次数+首次封板时间"
+    factor_type: stock
+    role: alpha
+    lookback_days: 1
+
+  - name: zt_relay_quality
+    class: LimitUpRelayQualityFactor
+    module: src.factors.formula.limit_up
+    description: "连板高度+封板质量+换手+板块宽度+资金确认"
+    factor_type: stock
+    role: alpha
+    lookback_days: 1
+
+  - name: zt_sector_breadth
+    class: LimitUpSectorBreadthFactor
+    module: src.factors.formula.limit_up
+    description: "同行业涨停扩散宽度"
+    factor_type: stock
+    role: alpha
+    lookback_days: 1
+
+  - name: zt_capital_confirmation
+    class: LimitUpCapitalConfirmationFactor
+    module: src.factors.formula.limit_up
+    description: "主力净流入/成交额确认"
+    factor_type: stock
+    role: alpha
+    lookback_days: 1
+
+  - name: zt_break_risk
+    class: LimitUpBreakRiskFactor
+    module: src.factors.formula.limit_up
+    description: "炸板次数+封单不足风险（只作否决项）"
+    factor_type: stock
+    role: filter
+    lookback_days: 1
+
 narrative_factors:
   - name: theme_lifecycle
     class: ThemeLifecycleFactor

@@ -2,7 +2,13 @@
 
 基于行为金融学的 A 股超短线因子挖掘系统。
 
-> 完整文档见 [DOCS.md](DOCS.md)
+按身份阅读，避免从实现细节中自行拼接结论：
+
+| 身份 | 先看 | 用途 |
+|------|------|------|
+| 股票分析用户 | [USER_GUIDE.md](USER_GUIDE.md) | 一条日常命令、操作卡解释、空仓条件 |
+| PM / 项目负责人 | [PROJECT_STATUS.md](PROJECT_STATUS.md) | 当前进度、证据、风险、下一步 |
+| 开发维护者 | [DOCS.md](DOCS.md) | 完整架构、数据口径与技术实现 |
 
 ## 架构
 
@@ -14,6 +20,7 @@ alpha-miner/
 │   ├── mine.py             #   因子进化挖掘 + 手术台 CLI
 │   ├── drift.py            #   漂移检测
 │   ├── backtest.py         #   单因子回测
+│   ├── limit_up.py         #   涨停专项进化 + 用户操作卡
 │   ├── replay.py           #   复盘引擎
 │   ├── strategy.py         #   策略管理 (list/backtest/evolve/scan)
 │   ├── signal.py           #   选股信号
@@ -21,23 +28,23 @@ alpha-miner/
 │   └── query.py            #   数据查询
 ├── src/
 │   ├── data/               # 数据层 (Storage + 7 个数据源采集器)
-│   ├── factors/            # 因子库 (5 公式 + 4 叙事)
+│   ├── factors/            # 因子库 (10 公式 + 4 叙事)
 │   ├── narrative/          # 叙事引擎 (新闻分类/剧本/复盘)
 │   ├── drift/              #   漂移检测 + 决策输出 (含动态 Regime 权重)
-│   ├── mining/             #   进化引擎 v2 (手术台+真实IC+定向变异+候选池)
+│   ├── mining/             #   通用 IC 进化 + 涨停事件专用进化
 │   ├── strategy/           #   策略子系统 (回测/进化/持久化/推荐/信号/风控)
 │   └── pipeline/           #   IC 管线 (批量计算 + 持久化)
 ├── factors/                # 进化产出的因子代码 (6 个已验收)
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
 ├── config/                 # factors.yaml + settings.yaml.example + recommend.yaml
 ├── scripts/                # 日常任务 + Windows/SSH 远程计算与数据发布
-├── tests/                  # 394 tests
+├── tests/                  # 404 passed + 2 skipped
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
 ## 因子体系
 
-### 公式因子 (5)
+### 基础公式因子 (5)
 
 | 因子 | 级别 | 逻辑 |
 |------|------|------|
@@ -46,6 +53,16 @@ alpha-miner/
 | main_flow_intensity | 股票 | 主力净流入 / 成交额 |
 | turnover_rank | 股票 | 换手率百分位排名 |
 | lhb_institution | 股票 | 龙虎榜机构净买入额排名 |
+
+### 涨停结构因子 (5)
+
+| 因子 | 角色 | 可操作含义 |
+|------|------|------------|
+| zt_seal_strength | alpha | 早封、少炸板、封单承接强，进入候选排序 |
+| zt_relay_quality | alpha | 连板高度与封板、换手、板块、资金共同确认 |
+| zt_sector_breadth | alpha | 同行业多股涨停，区分板块共振与孤立涨停 |
+| zt_capital_confirmation | alpha | 主力净流入相对成交额确认涨停强度 |
+| zt_break_risk | filter | 晚封、多次炸板、封单弱时降权或直接回避 |
 
 ### 叙事因子 (4)
 
@@ -57,6 +74,28 @@ alpha-miner/
 | leader_clarity | 股票 | 龙头成交额 / 第二名成交额 |
 
 验收标准：IC > 0.03, ICIR > 0.5, 胜率 > 55%, 盈亏比 > 1.2
+
+## 因子如何变成操作
+
+因子本身只负责描述和排序，不能直接等同于买入。涨停专项使用一条固定、可审计的链路：
+
+```text
+T0 收盘涨停事件
+  → 封板/接力/板块/资金/风险结构评分
+  → 次日开盘可成交检查（非一字板，涨幅在候选阈值内）
+  → 锁定测试通过才允许 CONDITIONAL_BUY
+  → 单票≤10%、最多3只
+  → 买入后第1或第2个完整交易日收盘退出（遵守 T+1）
+```
+
+训练、验证、锁定测试任一段不达标时，输出只能是 `WATCH_ONLY` 或 `AVOID`，仓位为 0。
+日常用户只运行：
+
+```powershell
+uv run python -m cli zt daily              # 盘后采集→算因子→次日操作卡
+uv run python -m cli zt daily --skip-collect  # 数据已有定时任务更新
+uv run python -m cli zt status             # 一眼查看数据与实盘闸门
+```
 
 ## 进化引擎 v2
 
@@ -145,9 +184,10 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 测试 (394 tests)
+## 测试（404 passed + 2 skipped）
 
-硬断言测试 47 个 + 手术台测试 24 个 + 回测器测试 4 个 + 进化完整性测试 5 个。覆盖叙事因子/IC端到端/进化引擎/模板因子/手术台诊断/定向变异。
+覆盖数据采集、14 个注册因子、涨停可成交标签/结构进化/操作闸门、IC 端到端、手术台、
+策略、漂移、报告和 Windows UTF-8 可移植性。2026-08-14 全量回归通过。
 
 ## Quick Start
 
@@ -168,9 +208,9 @@ uv run python -m cli script --date $DATE --save   # 7. 剧本
 uv run python -m cli report --brief               # 盘后简报
 ```
 
-## 远程计算（192.168.21.67）
+## 远程计算
 
-服务器 `/home/diskc/leigeng/alpha-miner` 是计算工作区，`data/alpha_miner.db` 是权威运行库。
+服务器工作区由本地私有配置指定，`data/alpha_miner.db` 是权威运行库。
 不要从 Windows 直接打开正在运行的 SQLite/WAL；X 盘只承担代码同步、数据库发布和快照读取。
 
 ```text
@@ -185,6 +225,9 @@ uv run python -m cli report --brief               # 盘后简报
 ```
 
 ```powershell
+# 首次复制模板并填写 SSH 用户、服务器地址和远程目录；本地文件不会进入 Git
+Copy-Item config\remote.example.ps1 config\remote.local.ps1
+
 # 首次部署（只有首次需要 -SeedData）
 .\scripts\remote_compute.ps1 -Action sync -SeedData
 .\scripts\remote_compute.ps1 -Action build
@@ -193,6 +236,7 @@ uv run python -m cli report --brief               # 盘后简报
 .\scripts\remote_compute.ps1 -Action sync
 .\scripts\remote_compute.ps1 -Action collect
 .\scripts\remote_compute.ps1 -Action evolve
+.\scripts\remote_compute.ps1 -Action evolve-limit-up
 .\scripts\remote_compute.ps1 -Action snapshot
 
 # 服务器行情出口不可用时：Windows 采集后发布一致性数据库

@@ -31,7 +31,9 @@ def yaml_file():
             "tags": ["低吸"],
         },
     ]
-    with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+    with tempfile.NamedTemporaryFile(
+        suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+    ) as f:
         yaml.dump({"strategies": strategies}, f, allow_unicode=True)
         path = f.name
     yield path
@@ -53,7 +55,9 @@ class TestLoadStrategies:
         assert s.exit.take_profit_pct == 5.0
 
     def test_empty_file(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+        ) as f:
             f.write("")
             path = f.name
         result = load_strategies(path)
@@ -65,7 +69,9 @@ class TestLoadStrategies:
         assert result == []
 
     def test_no_strategies_key(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+        ) as f:
             yaml.dump({"other_key": []}, f)
             path = f.name
         result = load_strategies(path)
@@ -80,7 +86,9 @@ class TestLoadStrategies:
                 {"bad_key_only": True},  # 缺少必要字段
             ]
         }
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+        ) as f:
             yaml.dump(data, f, allow_unicode=True)
             path = f.name
         result = load_strategies(path)
@@ -123,7 +131,9 @@ class TestListNames:
         assert names == ["策略A", "策略B"]
 
     def test_empty(self):
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", delete=False, mode="w", encoding="utf-8"
+        ) as f:
             f.write("")
             path = f.name
         assert list_strategy_names(path) == []

@@ -2,7 +2,6 @@
 
 import logging
 import time
-from datetime import datetime
 
 import akshare as ak
 import pandas as pd
@@ -38,6 +37,11 @@ def _safe_str(df: pd.DataFrame, col: str, default=""):
     return s.astype(str).fillna(default)
 
 
+def _safe_time(df: pd.DataFrame, col: str) -> pd.Series:
+    """Normalize AkShare HHMMSS values without losing a leading zero."""
+    return _safe_str(df, col, "").str.extract(r"(\d+)", expand=False).fillna("").str.zfill(6)
+
+
 # ── 涨停池 ──
 
 def fetch_zt_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
@@ -56,6 +60,11 @@ def fetch_zt_pool(trade_date: str, retries: int = 3) -> pd.DataFrame:
                 "amount": _safe_numeric(df, "成交额", 0).values,
                 "industry": _safe_str(df, "所属行业", "").values,
                 "circulation_mv": _safe_numeric(df, "流通市值", 0).values,
+                "total_mv": _safe_numeric(df, "总市值", 0).values,
+                "turnover_rate": _safe_numeric(df, "换手率", 0).values,
+                "seal_amount": _safe_numeric(df, "封板资金", 0).values,
+                "first_seal_time": _safe_time(df, "首次封板时间").values,
+                "last_seal_time": _safe_time(df, "最后封板时间").values,
                 "open_count": _safe_numeric(df, "炸板次数", 0).astype(int).values,
                 "zt_stats": _safe_str(df, "涨停统计", "").values,
             })

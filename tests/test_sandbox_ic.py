@@ -146,7 +146,7 @@ class TestSandboxRunnerConsistency:
         # 检查 sandbox.py 源码中没有 limit= 调用
         sandbox_path = "src/mining/sandbox.py"
         try:
-            with open(sandbox_path) as f:
+            with open(sandbox_path, encoding="utf-8") as f:
                 content = f.read()
             assert "limit=" not in content or "limit=None" in content, \
                 f"sandbox.py 中有对 db.query 的 limit= 调用，会报错"
@@ -157,7 +157,7 @@ class TestSandboxRunnerConsistency:
         """_sandbox_runner.py 必须包含 spearmanr 或 IC 计算逻辑。"""
         runner_path = "src/mining/_sandbox_runner.py"
         try:
-            with open(runner_path) as f:
+            with open(runner_path, encoding="utf-8") as f:
                 content = f.read()
             has_ic = ("spearmanr" in content or
                       "spearman" in content.lower() or

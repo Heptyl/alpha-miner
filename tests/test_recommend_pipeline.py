@@ -221,7 +221,7 @@ class TestPush:
         assert Path(results["json"]).exists()
 
         # 检查 JSON 可解析
-        data = json.loads(Path(results["json"]).read_text())
+        data = json.loads(Path(results["json"]).read_text(encoding="utf-8"))
         assert data["trade_date"] == "2026-04-24"
         assert len(data["stocks"]) == 2
 
@@ -244,7 +244,7 @@ class TestPush:
         )
 
         assert results["file"]
-        txt = Path(results["file"]).read_text()
+        txt = Path(results["file"]).read_text(encoding="utf-8")
         assert "无符合条件" in txt
 
     def test_report_to_text(self, sample_report):
