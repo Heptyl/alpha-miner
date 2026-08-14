@@ -7,10 +7,10 @@
 4. 计算每日 Spearman rank correlation → ic_mean, icir, win_rate
 """
 import json
-import sys
 import os
+import sys
 import traceback
-from importlib import util
+
 
 def main():
     code_path = sys.argv[1]
@@ -23,10 +23,12 @@ def main():
             code = f.read()
 
         # 在受限命名空间执行，注入基础依赖
-        import pandas as pd
-        import numpy as np
         from datetime import datetime, timedelta
+
+        import numpy as np
+        import pandas as pd
         from scipy.stats import spearmanr
+
         from src.data.storage import Storage
 
         # 回测模式：注入 BacktestStorage，所有 query 调用自动 bypass snapshot_time
@@ -76,6 +78,10 @@ def main():
 
         if "compute" not in ns:
             print(json.dumps({"error": "代码中未定义 compute(universe, as_of, db) 函数"}))
+            return
+
+        if os.environ.get("SANDBOX_VALIDATE_ONLY") == "1":
+            print(json.dumps({"validated": True, "factor_name": factor_name}))
             return
 
         # 构造测试参数（回测用 BacktestStorage 绕过 snapshot_time）
@@ -169,7 +175,7 @@ def main():
             # 调用 compute
             try:
                 factor_values = ns["compute"](universe, as_of, db)
-            except Exception as e:
+            except Exception:
                 continue
 
             if factor_values is None or not isinstance(factor_values, pd.Series):
@@ -237,7 +243,7 @@ def main():
         }
         print(json.dumps(result, ensure_ascii=False))
 
-    except Exception as e:
+    except Exception:
         print(json.dumps({"error": traceback.format_exc()[-500:]}))
 
 if __name__ == "__main__":

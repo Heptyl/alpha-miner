@@ -25,7 +25,7 @@ alpha-miner/
 │   │   ├── collector.py    #   CollectorManager 调度器
 │   │   ├── backfill_price.py#  历史价格回填 (baostock)
 │   │   └── sources/        #   akshare 采集器
-│   │       ├── akshare_price.py       #  日线行情 (stock_zh_a_daily)
+│   │       ├── akshare_price.py       #  腾讯全市场实时行情 + 历史日线回退
 │   │       ├── akshare_zt_pool.py     #  涨停/跌停/炸板/强势股池
 │   │       ├── akshare_lhb.py         #  龙虎榜明细
 │   │       ├── akshare_fund_flow.py   #  资金流向 (同花顺全市场排名)
@@ -99,10 +99,82 @@ alpha-miner/
 ├── scripts/
 │   ├── daily_run.sh        #   每日 7 步完整流程
 │   ├── hourly_mine.sh      #   定时进化挖掘
-│   └── compute_factors.py  #   因子计算脚本
-├── tests/                  # 349 tests
+│   ├── compute_factors.py  #   因子计算脚本
+│   ├── remote_compute.ps1  #   Windows→SSH 同步/构建/采集/进化/发布
+│   ├── server_run.sh       #   服务器 Docker/离线 Python 统一入口
+│   ├── publish_data.py     #   SQLite backup 一致性上传
+│   └── activate_data.py    #   校验、保留上一版、原子激活
+├── tests/                  # 394 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
+
+## 远程计算架构
+
+目标服务器为 `leigeng@192.168.21.67`，工作区为
+`/home/diskc/leigeng/alpha-miner`（Windows 映射为 `X:\alpha-miner`）。服务器有 256 个
+CPU、约 503 GiB 内存，适合并行候选回测；磁盘当前使用率较高，因此不复制无界中间结果。
+
+### 数据流与职责
+
+```text
+                 模式 A：服务器行情出口可用
+腾讯/同花顺/AkShare ─────────────────────────→ collect
+
+                 模式 B：Windows 中继
+腾讯/同花顺/AkShare → Windows collect → SQLite backup → incoming/*.db
+                                                         │ quick_check
+                                                         │ 保留 previous
+                                                         └─ os.replace 原子激活
+
+                         data/alpha_miner.db（服务器权威库）
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ↓                                   ↓
+             因子/策略计算                     EvolutionEngine workers
+                                                        │
+                               evolution_state.json / mining_log.jsonl /
+                                         candidate_pool.jsonl
+```
+
+- SQLite/WAL 始终在服务器本地路径运行，不能把 `X:` 上的活动数据库交给 Windows 直接打开。
+- `publish-data` 使用 SQLite backup API 生成一致副本；服务器先 `quick_check`，再原子切换，
+  原运行库保存为 `data/alpha_miner.previous.db`。
+- `snapshot` 同样使用 SQLite backup API，Windows 只读
+  `X:\alpha-miner\reports\alpha_miner.snapshot.db`。
+- 首次 `build` 优先使用 Docker；Docker Hub 不可达时由 Windows 准备 Python 3.12 Linux
+  离线运行时和锁定依赖，不要求服务器 root 权限。
+
+### 操作命令
+
+```powershell
+# 首次部署
+.\scripts\remote_compute.ps1 -Action sync -SeedData
+.\scripts\remote_compute.ps1 -Action build
+
+# 服务器可直连行情源
+.\scripts\remote_compute.ps1 -Action collect
+
+# Windows 中继数据
+uv run python -m cli collect --today
+.\scripts\remote_compute.ps1 -Action publish-data
+
+# 远程并行进化与一致性快照
+.\scripts\remote_compute.ps1 -Action evolve
+.\scripts\remote_compute.ps1 -Action snapshot
+```
+
+服务器若通过代理访问行情源，应设置标准 `HTTP_PROXY`/`HTTPS_PROXY`；腾讯采集会话还需
+`ALPHA_MINER_USE_PROXY=1`。默认远程进化为 10 代、每代 16 个候选、16 workers，可通过
+`ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、`ALPHA_MINER_WORKERS` 调整。
+
+### 数据采集性能与正确性
+
+- 腾讯全市场日线约 0.9 秒/5200 只；使用字段 36 的成交量（手）和字段 35 的成交额（元），
+  并校验报价日期，历史/节假日不会误写成实时快照。
+- 同花顺资金流约 5 秒/5200 只，4 路分页并发；`亿/万` 统一换算为元，与日线成交额同量纲。
+- 采集器按互不依赖的数据源并发抓取、串行落库；V8/同花顺 token 初始化留在主线程，避免
+  `py_mini_racer` 并发初始化导致进程崩溃。
+- 历史回填禁止写入实时资金流、新闻和当前市场情绪，避免未来数据污染。
 
 ## 因子详细说明
 
@@ -362,11 +434,15 @@ observing → rejected (任意一天不达标)
 | ic_history | 逐日 IC 记录 |
 | status | new / observing / promoted / rejected |
 
-### Step 6: 历史反馈
+### Step 6: checkpoint、续跑与种群重启
 
-`src/mining/evolution.py` 的 `_get_historical_failures()` 方法。
+每代结束原子写入 `evolution_state.json`，记录累计代数、底层数据指纹、已测试语义签名、
+累计验收因子和下一代 frontier。默认续跑不会重复评估旧候选；`--fresh` 才清空内存状态重启。
 
-进化引擎记住每个假说的失败历史。连续失败 ≥3 次的假说自动跳过，避免无限循环浪费。
+失败候选不再因固定次数被永久丢弃。引擎按连续 fitness 选择有学习价值的失败者做定向变异；
+当 frontier 为空且知识种子全部测试过时，会从 `mining_log.jsonl` 恢复历史最佳失败者，生成
+新阈值/新窗口的可执行变体，使长时间任务自动复苏。若数据指纹没有变化则告警，提醒样本内
+过拟合风险。
 
 ### Step 7: CLI 集成
 
@@ -378,6 +454,12 @@ python -m cli mine surgery --factor consecutive_board --days 60
 
 # 指定日期范围
 python -m cli mine surgery --factor theme_lifecycle --start 2026-01-01 --end 2026-03-31
+
+# 续跑 10 代，服务器并行评估 16 个候选
+python -m cli mine evolve --generations 10 --population 16 --workers 16
+
+# 明确从知识种子重新开始
+python -m cli mine evolve --fresh --generations 3 --population 8
 ```
 
 输出：SurgeryReport 的格式化文本（三分段 IC + 诊断 + 建议）。
@@ -513,7 +595,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试 (349 tests)
+## 测试 (394 tests)
 
 ### 硬断言测试 (47 个)
 
@@ -533,6 +615,8 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | test_backtester | FactorBacktester 逐日 IC 计算、ic_series 结构、连续段过滤 (4 tests) |
 | test_surgery_table | 因子手术台三分段分析、诊断分类、黄金窗口检测 (24 tests) |
 | test_evolution_integrity | 进化完整性：阈值非零、IC=0 拒绝、知识库加载 (5 tests) |
+| test_continuous_evolution | 失败者进下一代、checkpoint 续跑、空种群复苏、可执行变异 |
+| test_data_fetch_optimization | 行情字段/日期、金额单位、采集并发、历史隔离、代理开关 |
 
 ### 其他测试文件
 

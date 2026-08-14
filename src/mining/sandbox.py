@@ -1,6 +1,7 @@
 """沙箱执行器 — 子进程隔离执行因子代码，60 秒超时。"""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,12 @@ class Sandbox:
     def __init__(self, db_path: str = "data/alpha_miner.db"):
         self.db_path = db_path
 
-    def execute(self, code: str, factor_name: str = "unknown") -> dict:
+    def execute(
+        self,
+        code: str,
+        factor_name: str = "unknown",
+        validate_only: bool = False,
+    ) -> dict:
         """在子进程中执行因子代码并收集结果。
 
         Returns:
@@ -55,6 +61,10 @@ class Sandbox:
                 capture_output=True,
                 text=True,
                 timeout=self.TIMEOUT,
+                env={
+                    **os.environ,
+                    **({"SANDBOX_VALIDATE_ONLY": "1"} if validate_only else {}),
+                },
             )
 
             if result.returncode != 0:
@@ -77,12 +87,15 @@ class Sandbox:
         finally:
             Path(code_path).unlink(missing_ok=True)
 
+    def validate(self, code: str, factor_name: str = "unknown") -> dict:
+        """只在隔离子进程中编译/加载代码，真实 IC 由 FactorBacktester 计算一次。"""
+        return self.execute(code, factor_name=factor_name, validate_only=True)
+
     def evaluate(self, code: str, lookback_days: int = 20, as_of=None) -> dict | None:
         """执行因子代码并返回 IC 评估结果。
 
         封装 execute()，提取 ic_result 字段返回。
         """
-        import tempfile
         from datetime import datetime
 
         # 构建 wrapper code：在原始 code 外包裹 as_of 控制

@@ -5,7 +5,6 @@
 
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 
 from src.mining.surgery_table import SurgeryReport
@@ -95,7 +94,10 @@ class FailureAnalyzer:
 
         ic = backtest_result.get("ic_mean", 0.0)
         icir = backtest_result.get("icir", 0.0)
-        sample = backtest_result.get("avg_sample_per_day", 0)
+        sample = backtest_result.get(
+            "avg_sample_per_day",
+            backtest_result.get("sample_per_day", 0),
+        )
         correlation = backtest_result.get("max_correlation", 0.0)
         ic_series = backtest_result.get("ic_series", pd.Series(dtype=float))
 

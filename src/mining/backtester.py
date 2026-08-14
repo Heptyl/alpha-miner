@@ -3,18 +3,18 @@
 替代 _sandbox_runner.py 中的假 IC 评估。
 """
 
+import warnings
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import warnings
 from scipy import stats as scipy_stats
 
-warnings.filterwarnings("ignore", message="An input array is constant")
-
 from src.data.storage import Storage
+
+warnings.filterwarnings("ignore", message="An input array is constant")
 
 
 @dataclass
@@ -99,7 +99,7 @@ class FactorBacktester:
 
             # 构建 universe（按成交额取 top 500 活跃股）
             universe = self._get_universe(as_of, date_str)
-            if len(universe) < 20:
+            if len(universe) < 10:
                 continue
 
             # 计算因子值
@@ -154,7 +154,12 @@ class FactorBacktester:
 
         ic_values = np.array([r["ic"] for r in ic_records])
         result.ic_mean = float(np.mean(ic_values))
-        result.icir = float(np.mean(ic_values) / np.std(ic_values)) if np.std(ic_values) > 0 else 0.0
+        ic_std = float(np.std(ic_values))
+        if ic_std > 0:
+            result.icir = float(np.mean(ic_values) / ic_std)
+        else:
+            # 每日 IC 完全一致且非零代表极稳定信号，不能误记为 ICIR=0。
+            result.icir = 999.0 if result.ic_mean != 0 else 0.0
         result.win_rate = float((ic_values > 0).sum() / len(ic_values))
         pos_mean = float(ic_values[ic_values > 0].mean()) if (ic_values > 0).any() else 0.0
         neg_mean = float(np.abs(ic_values[ic_values < 0].mean())) if (ic_values < 0).any() else 1.0

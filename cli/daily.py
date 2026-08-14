@@ -25,7 +25,10 @@ STEPS = [
         "from src.pipeline.runner import run_regime_pipeline; "
         "db=Storage(); db.init_db(); run_regime_pipeline(db)"]),
     ("3/8 漂移检测", ["-m", "cli.drift", "--date", "{date}"]),
-    ("4/8 因子进化", ["-m", "cli.mine", "evolve", "--generations", "3", "--population", "5"]),
+    ("4/8 因子进化", [
+        "-m", "cli.mine", "evolve", "--generations", "3", "--population", "5",
+        "--workers", "{workers}",
+    ]),
     ("5/8 生成日报", ["-m", "cli.report", "--date", "{date}"]),
     ("6/8 生成市场剧本", ["-m", "cli", "script", "--date", "{date}", "--save"]),
     ("7/8 复盘昨日剧本", ["-m", "cli", "replay", "--date", "{date}", "--save"]),
@@ -33,9 +36,12 @@ STEPS = [
 ]
 
 
-def _run(title: str, args: list[str], date: str) -> None:
+def _run(title: str, args: list[str], date: str, workers: int) -> None:
     print(f"\n[{title}]", flush=True)
-    cmd = [sys.executable] + [a.replace("{date}", date) for a in args]
+    cmd = [sys.executable] + [
+        a.replace("{date}", date).replace("{workers}", str(workers))
+        for a in args
+    ]
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(cmd, cwd=str(ROOT), env=env)
     if result.returncode != 0:
@@ -47,11 +53,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Alpha Miner 每日流程(跨平台)")
     parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"),
                         help="目标日期 YYYY-MM-DD，默认今天")
+    parser.add_argument(
+        "--evolution-workers",
+        type=int,
+        default=int(os.environ.get("ALPHA_MINER_WORKERS", "1")),
+        help="进化候选并行数；本机默认1，计算服务器建议8-16",
+    )
     args = parser.parse_args()
 
     print(f"===== Alpha Miner Daily Run: {args.date} =====", flush=True)
     for title, step_args in STEPS:
-        _run(title, step_args, args.date)
+        _run(title, step_args, args.date, args.evolution_workers)
     print(f"\n===== Done: {args.date} =====", flush=True)
 
 

@@ -6,8 +6,6 @@
 
 from copy import deepcopy
 
-import numpy as np
-
 
 class FactorMutator:
     """对失败因子进行定向变异。"""
@@ -172,7 +170,7 @@ class FactorMutator:
         new_config = deepcopy(config)
         new_config["name"] = f"{config.get('name', 'unknown')}_reversed"
         new_config["mutation_type"] = "reverse_direction"
-        new_config["reverse"] = True
+        new_config["reverse"] = not bool(config.get("reverse", False))
         # 翻转 direction 字段
         if "direction" in new_config:
             d = new_config["direction"]

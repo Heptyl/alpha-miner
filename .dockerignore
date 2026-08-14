@@ -1,0 +1,13 @@
+.git
+.venv
+.server-runtime
+.pytest_cache
+.uvtmp
+.uv_tmp
+__pycache__
+*.pyc
+data
+logs
+reports
+signals
+recommendations

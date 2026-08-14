@@ -12,15 +12,12 @@
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
-
-import yaml
 
 from src.data.storage import Storage
 from src.factors.registry import FactorRegistry
 from src.mining.backtester import FactorBacktester
-from src.mining.evolution import EvolutionEngine, Candidate
+from src.mining.evolution import EvolutionEngine
 from src.mining.failure_analyzer import FailureAnalyzer
 from src.mining.mutator import FactorMutator
 from src.mining.surgery_table import FactorSurgeryTable
@@ -92,15 +89,22 @@ def cmd_evolve(args):
     )
 
     print(f"\n{'='*60}")
-    print(f"  Alpha Miner 进化引擎")
+    print("  Alpha Miner 进化引擎")
     print(f"  generations={args.generations}, population={args.population}")
     print(f"{'='*60}\n")
 
-    accepted = engine.run(generations=args.generations, population_size=args.population)
+    accepted = engine.run(
+        generations=args.generations,
+        population_size=args.population,
+        resume=not args.fresh,
+        workers=args.workers,
+    )
 
     print(f"\n{'='*60}")
-    print(f"  进化完成")
+    print("  进化完成")
     print(f"  总验收因子: {len(accepted)}")
+    print(f"  累计进化代数: {engine.completed_generations}")
+    print(f"  待观察因子: {len(engine.candidate_pool.get_pending())}")
     print(f"{'='*60}")
 
     for c in accepted:
@@ -304,7 +308,7 @@ def cmd_surgery(args):
     # Regime 分段
     if report.regime_breakdown:
         print(f"  {'='*55}")
-        print(f"  市场状态分段 (Regime Breakdown)")
+        print("  市场状态分段 (Regime Breakdown)")
         print(f"  {'='*55}")
         print(f"  {'Regime':<16} {'IC均值':>8} {'ICIR':>8} {'天数':>6} {'有效':>6}")
         print(f"  {'-'*50}")
@@ -316,7 +320,7 @@ def cmd_surgery(args):
     # 情绪分段
     if report.emotion_breakdown:
         print(f"  {'='*55}")
-        print(f"  情绪分段 (Emotion Breakdown)")
+        print("  情绪分段 (Emotion Breakdown)")
         print(f"  {'='*55}")
         print(f"  {'情绪桶':<16} {'IC均值':>8} {'ICIR':>8} {'天数':>6} {'有效':>6}")
         print(f"  {'-'*50}")
@@ -330,7 +334,7 @@ def cmd_surgery(args):
     # 时间分段对比
     if report.time_decay:
         print(f"  {'='*55}")
-        print(f"  时间分段对比 (Time Decay)")
+        print("  时间分段对比 (Time Decay)")
         print(f"  {'='*55}")
         print(f"  {'时间段':<16} {'IC均值':>8} {'天数':>6}")
         print(f"  {'-'*35}")
@@ -343,7 +347,7 @@ def cmd_surgery(args):
     # 黄金窗口
     if report.golden_windows:
         print(f"  {'='*55}")
-        print(f"  黄金窗口 (Golden Windows)")
+        print("  黄金窗口 (Golden Windows)")
         print(f"  {'='*55}")
         print(f"  {'起始日':<14} {'结束日':<14} {'Regime':<14} {'平均IC':>8}")
         print(f"  {'-'*55}")
@@ -361,7 +365,7 @@ def cmd_surgery(args):
     }
     diag_label = diagnosis_labels.get(report.diagnosis, report.diagnosis)
     print(f"  {'='*55}")
-    print(f"  诊断结果")
+    print("  诊断结果")
     print(f"  {'='*55}")
     print(f"  类型: {diag_label}")
     if report.best_regime:
@@ -383,6 +387,8 @@ def main():
     p_evolve = subparsers.add_parser("evolve", help="完整进化循环")
     p_evolve.add_argument("--generations", type=int, default=5, help="进化代数")
     p_evolve.add_argument("--population", type=int, default=10, help="每代种群大小")
+    p_evolve.add_argument("--workers", type=int, default=1, help="并行评估候选数；本机默认1，服务器可设8-16")
+    p_evolve.add_argument("--fresh", action="store_true", help="忽略上次 frontier，从知识库重新开始")
 
     # test-seeds
     p_test = subparsers.add_parser("test-seeds", help="测试知识库种子假说")

@@ -30,8 +30,8 @@ alpha-miner/
 ├── factors/                # 进化产出的因子代码 (6 个已验收)
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
 ├── config/                 # factors.yaml + settings.yaml.example + recommend.yaml
-├── scripts/                # daily_run.sh + hourly_mine.sh
-├── tests/                  # 349 tests
+├── scripts/                # 日常任务 + Windows/SSH 远程计算与数据发布
+├── tests/                  # 394 tests
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -63,11 +63,12 @@ alpha-miner/
 ```
 知识库种子 (12 假说)
     ↓ LLM/模板 → 代码翻译
-因子代码 → 真实回测 (FactorBacktester, 逐日 Spearman IC)
+因子代码 → 隔离加载 → 真实回测 (FactorBacktester, 逐日 Spearman IC)
     ↓ 带 regime/zt_count 的 ic_series
 因子手术台 (三分段分析 + 黄金窗口 + 诊断)
     ↓ 验收通过 → 候选池 (5天观察期)
-    ↓ 失败 → 定向变异 (手术台驱动) → 重试
+    ↓ 失败 → 定向变异 (手术台驱动) → 下一代 checkpoint
+frontier 为空 → 历史最佳失败者重启种群 → 继续探索
 ```
 
 核心升级：
@@ -75,7 +76,8 @@ alpha-miner/
 - **因子手术台**：regime/情绪/时间三分段 IC 分析 + 黄金窗口检测 + 5种诊断
 - **定向变异**：基于手术台诊断做 regime 过滤/情绪过滤/方向反转/窗口调整
 - **候选池**：5 天观察期，连续达标才入库
-- **历史反馈**：失败≥3次的假说自动跳过
+- **持续进化**：保存代数/frontier/已测试签名，续跑不重算；空种群从历史失败者自动复苏
+- **并行评估**：`--workers N` 并行回测候选；本地默认 1，服务器建议 8–16
 - **动态权重**：Regime 权重从历史 IC 动态计算，硬编码值作 fallback
 
 CLI 手术台：
@@ -143,7 +145,7 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 测试 (349 tests)
+## 测试 (394 tests)
 
 硬断言测试 47 个 + 手术台测试 24 个 + 回测器测试 4 个 + 进化完整性测试 5 个。覆盖叙事因子/IC端到端/进化引擎/模板因子/手术台诊断/定向变异。
 
@@ -165,6 +167,49 @@ uv run python -m cli script --date $DATE --save   # 7. 剧本
 
 uv run python -m cli report --brief               # 盘后简报
 ```
+
+## 远程计算（192.168.21.67）
+
+服务器 `/home/diskc/leigeng/alpha-miner` 是计算工作区，`data/alpha_miner.db` 是权威运行库。
+不要从 Windows 直接打开正在运行的 SQLite/WAL；X 盘只承担代码同步、数据库发布和快照读取。
+
+```text
+行情源 ──(服务器有行情出口)──────────────→ 服务器 collect ─┐
+行情源 ──→ Windows collect ─→ SQLite backup ─→ 原子激活 ─┤
+                                                        ↓
+                                              服务器本地 SQLite
+                                                        ↓
+                                  8–16 workers 并行回测/持续进化
+                                                        ↓
+                                state + mining log + candidate pool
+```
+
+```powershell
+# 首次部署（只有首次需要 -SeedData）
+.\scripts\remote_compute.ps1 -Action sync -SeedData
+.\scripts\remote_compute.ps1 -Action build
+
+# 日常操作：代码同步、服务器直采、进化
+.\scripts\remote_compute.ps1 -Action sync
+.\scripts\remote_compute.ps1 -Action collect
+.\scripts\remote_compute.ps1 -Action evolve
+.\scripts\remote_compute.ps1 -Action snapshot
+
+# 服务器行情出口不可用时：Windows 采集后发布一致性数据库
+uv run python -m cli collect --today
+.\scripts\remote_compute.ps1 -Action publish-data
+```
+
+若服务器不能访问 Docker Hub，`build` 会由 Windows 下载 Linux CPython 和锁定依赖到
+`.server-runtime`，服务器自动使用离线运行时，无需服务器 root 权限或公网访问。
+
+默认进化参数为 10 代、每代 16 个候选、16 个并发 worker。可在服务器上通过
+`ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、`ALPHA_MINER_WORKERS` 调整。
+一致性快照位于 `X:\alpha-miner\reports\alpha_miner.snapshot.db`。
+如果服务器行情访问依赖代理，设置标准 `HTTP_PROXY`/`HTTPS_PROXY`，并设置
+`ALPHA_MINER_USE_PROXY=1` 让腾讯会话继承代理。若暂时无法直采，在 Windows 完成
+`collect` 后运行 `publish-data`；它通过
+SQLite backup API 上传一致性副本，在服务器校验后原子替换运行库，并保留上一版。
 
 ## License
 
