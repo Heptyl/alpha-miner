@@ -125,11 +125,16 @@ def collect_date(trade_date: str, db: Optional[Storage] = None, mode: str = "tod
     if mode not in {"today", "backfill"}:
         raise ValueError(f"unsupported collection mode: {mode}")
 
+    results = dict.fromkeys(_RESULT_KEYS, 0)
+    requested_date = datetime.strptime(trade_date, "%Y-%m-%d")
+    if requested_date.weekday() >= 5:
+        logger.warning("collection skipped: %s is a weekend", trade_date)
+        return results
+
     if db is None:
         db = Storage()
         db.init_db()
 
-    results = dict.fromkeys(_RESULT_KEYS, 0)
     is_live_date = (
         mode == "today"
         and trade_date == datetime.now().strftime("%Y-%m-%d")

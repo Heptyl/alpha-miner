@@ -105,6 +105,19 @@ def test_news_parallel_deduplicates(monkeypatch):
     assert result.iloc[0]["news_id"] == "same-news"
 
 
+def test_weekend_collection_does_not_call_sources(tmp_path, monkeypatch):
+    db = Storage(str(tmp_path / "collector.db"))
+    db.init_db()
+    monkeypatch.setattr(
+        "src.data.collector._fetch_many",
+        lambda *args, **kwargs: pytest.fail("weekend collection called a network source"),
+    )
+
+    results = collect_date("2026-04-25", db=db)
+
+    assert all(count == 0 for count in results.values())
+
+
 def test_backfill_never_stamps_live_only_sources_as_history(tmp_path, monkeypatch):
     db = Storage(str(tmp_path / "collector.db"))
     db.init_db()
