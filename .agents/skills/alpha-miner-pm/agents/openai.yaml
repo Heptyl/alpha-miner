@@ -1,0 +1,6 @@
+interface:
+  display_name: "Alpha Miner PM"
+  short_description: "Read-only project and product governance"
+  default_prompt: "Use $alpha-miner-pm to review progress, feedback, evolution evidence, risks, and one RD priority without changing project state."
+policy:
+  allow_implicit_invocation: false

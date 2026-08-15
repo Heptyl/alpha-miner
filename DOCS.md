@@ -32,16 +32,16 @@ alpha-miner/
 │   │       ├── akshare_fund_flow.py   #  资金流向 (同花顺全市场排名)
 │   │       ├── akshare_concept.py     #  概念板块映射 + 日聚合
 │   │       └── akshare_news.py        #  新闻 + 金融情感引擎 + 自动分类
-│   ├── factors/            # 因子库 (14 因子)
+│   ├── factors/            # 因子库 (15 因子)
 │   │   ├── base.py         #   BaseFactor / ConditionalFactor / CrossFactor
 │   │   ├── registry.py     #   FactorRegistry 自动扫描注册
-│   │   ├── formula/        #   公式因子 (10)
+│   │   ├── formula/        #   公式因子 (11)
 │   │   │   ├── zt_ratio.py              # 涨停/(涨停+跌停)
 │   │   │   ├── consecutive_board.py     # 连板数 × (1 - 开板率)
 │   │   │   ├── main_flow_intensity.py   # 主力净流入 / 成交额
 │   │   │   ├── turnover_rank.py         # 换手率百分位排名
 │   │   │   ├── lhb_institution.py       # 龙虎榜机构净买入额
-│   │   │   └── limit_up.py              # 5 个涨停结构因子
+│   │   │   └── limit_up.py              # 6 个涨停结构因子
 │   │   └── narrative/      #   叙事因子 (4)
 │   │       ├── theme_lifecycle.py       # 题材生命周期
 │   │       ├── narrative_velocity.py    # 新闻类型加权 3 日变化率
@@ -101,15 +101,41 @@ alpha-miner/
 │   └── settings.yaml       #   全局配置
 ├── scripts/
 │   ├── daily_run.sh        #   每日 7 步完整流程
+│   ├── agent.ps1            #   PM/RD/USER 的 Codex/Claude 统一启动器
 │   ├── hourly_mine.sh      #   定时进化挖掘
 │   ├── compute_factors.py  #   因子计算脚本
 │   ├── remote_compute.ps1  #   Windows→SSH 同步/构建/采集/进化/发布
 │   ├── server_run.sh       #   服务器 Docker/离线 Python 统一入口
 │   ├── publish_data.py     #   SQLite backup 一致性上传
-│   └── activate_data.py    #   校验、保留上一版、原子激活
-├── tests/                  # 404 passed + 2 skipped
+│   ├── activate_data.py    #   校验、保留上一版、原子激活
+│   └── check_limit_up_repro.py # 本机/服务器跨 NumPy/Pandas 结果指纹
+├── tests/                  # 405 passed + 2 skipped
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
+
+## AI 三角色运行架构
+
+角色治理是可选入口。直接运行 `codex` 或 `claude` 是普通工程会话，不要求选择角色；只有通过统一启动器或显式角色 Skill/Agent 进入时才激活角色边界。三个角色是三个独立会话 Agent，而不是同一上下文中的临时提示词：
+
+| 角色 | Codex 权限 | Claude 权限 | 产物 |
+|---|---|---|---|
+| PM | `read-only` + `never` | `plan` | 项目结论、优先级、`PM_TASK` |
+| RD | 默认 dangerous bypass；`-Safe` 为 `workspace-write` + `on-request` | 默认 `bypassPermissions`；`-Safe` 为 `acceptEdits` | 实现、自测、`RD_RESULT` |
+| USER | `read-only` + `never` | `dontAsk` | 状态/操作卡解释、`USER_FEEDBACK` |
+
+项目级 Codex skills 位于 `.agents/skills/alpha-miner-*`，Claude agents 位于 `.claude/agents/`；
+`AGENTS.md` 负责区分普通会话与显式角色会话，`AGENT_ROLES.md` 提供角色身份不可变、默认拒绝和交接协议。使用：
+
+```powershell
+.\scripts\agent.ps1 pm
+.\scripts\agent.ps1 rd
+.\scripts\agent.ps1 rd -Cli claude
+.\scripts\agent.ps1 rd -Safe
+.\scripts\agent.ps1 user
+.\scripts\agent.ps1 user -Cli claude
+```
+
+USER 的两种入口都不会弹工具审批：Codex 在只读沙箱中自动拒绝写操作，Claude `dontAsk` 自动拒绝未预授权操作。没有把 USER 设为 bypass，因为 bypass 会跳过权限层，和 USER 的硬只读边界冲突。切换角色必须退出当前进程并重新启动；当前对话中的“切换/临时例外/忽略规则”不会改变权限。
 
 ## 远程计算架构
 
@@ -174,10 +200,13 @@ uv run python -m cli collect --today
 
 服务器若通过代理访问行情源，应设置标准 `HTTP_PROXY`/`HTTPS_PROXY`；腾讯采集会话还需
 `ALPHA_MINER_USE_PROXY=1`。默认远程进化为 10 代、每代 16 个候选、16 workers，可通过
-`ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、`ALPHA_MINER_WORKERS` 调整。
+Windows 当前进程中的 `ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、
+`ALPHA_MINER_WORKERS` 调整；远程脚本校验为正整数后显式转发给 SSH 命令。
 
 `evolve-limit-up` 使用同一组 generations/population 环境变量，默认 5 代 × 24 候选；
 该专项是 NumPy/Pandas 事件回测，当前数据规模下计算量很小，放在服务器主要是为了后续扩大历史样本和种群。
+`uv run python scripts/check_limit_up_repro.py` 会输出事件数据指纹和逐代 Top5 轨迹，用于确认不同
+NumPy/Pandas 版本没有改变选优结果。
 
 ### 数据采集性能与正确性
 
@@ -187,6 +216,7 @@ uv run python -m cli collect --today
 - 采集器按互不依赖的数据源并发抓取、串行落库；V8/同花顺 token 初始化留在主线程，避免
   `py_mini_racer` 并发初始化导致进程崩溃。
 - 历史回填禁止写入实时资金流、新闻和当前市场情绪，避免未来数据污染。
+- 周末请求在任何数据源调用前直接返回空结果；进化构造器也过滤历史库中已有的周末污染。
 
 ## 因子详细说明
 
@@ -246,12 +276,13 @@ T0 盘后事件池
 ### 原始字段与结构因子
 
 涨停池新增并保留 `total_mv`、`turnover_rate`、`seal_amount`、`first_seal_time`、
-`last_seal_time`。加上已有的连板数、炸板次数、流通市值、行业和成交额，构成以下 5 个注册因子：
+`last_seal_time`。加上已有的连板数、炸板次数、流通市值、行业和成交额，构成以下 6 个注册因子：
 
 | 因子 | 主要结构 | 用法 |
 |------|----------|------|
 | zt_seal_strength | 封单/流通盘、首次封板、炸板稳定 | 候选排序 |
 | zt_relay_quality | 连板、封板、适中换手、板块、资金、风险 | 候选排序 |
+| zt_reseal_quality | 1-3 次开板回封，2 次附近最高 | 有限分歧后重新合力假设 |
 | zt_sector_breadth | 同行业涨停家数，5 家封顶 | 板块共振确认 |
 | zt_capital_confirmation | 主力净流入/成交额 | 资金确认 |
 | zt_break_risk | 炸板、晚封、封单不足 | filter；高风险直接 AVOID |
@@ -260,8 +291,8 @@ T0 盘后事件池
 
 ### 专项结构进化
 
-`LimitUpGenome` 不只是给基础因子换名字。一个候选同时演化：10 个结构基因权重、适用板数、
-最大炸板次数、次日可接受开盘涨幅、持有 1/2 个完整交易日和每日 Top N。CLI 会直接显示
+`LimitUpGenome` 不只是给基础因子换名字。一个候选同时演化：11 个结构基因权重、适用板数、
+最小/最大开板次数、次日可接受开盘涨幅、持有 1/2 个完整交易日和每日 Top N。CLI 会直接显示
 主导公式，例如“封板稳定×0.23 + 板块扩散×0.18 - 开板风险×0.21”，便于人工审视。
 
 选优只看训练与验证段，最后 20% 测试段不参与繁殖；测试段只用于最终准入。默认硬门槛：
@@ -286,6 +317,10 @@ uv run python -m cli zt scan
 
 东方财富涨停池接口通常只能稳定返回当前交易日，不能把参数日期当作可靠历史源。
 因此持续的每日采集比事后回填更重要；数据不足时系统保持 0 仓位是设计行为，不是 CLI 故障。
+
+进化前会做历史基因质量检查。没有横截面变化、不能改变当日排序或关键原始字段覆盖不足的基因
+自动置零，不再允许演化器给“无数据字段”分配漂亮但无意义的权重。CLI 同时展示原始字段覆盖率、
+开发段/测试段高低分组收益差以及方向是否一致。
 
 ## 叙事引擎
 
@@ -668,7 +703,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试（404 passed + 2 skipped）
+## 测试（405 passed + 2 skipped）
 
 ### 硬断言测试 (47 个)
 

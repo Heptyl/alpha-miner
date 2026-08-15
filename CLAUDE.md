@@ -1,5 +1,11 @@
 # Alpha Miner — 项目指南
 
+## 可选角色入口
+
+直接启动的普通 Claude 会话不要求选择角色，可以按用户要求正常处理工程任务。只有通过
+`.\scripts\agent.ps1 <pm|rd|user> -Cli claude` 或显式选择 `alpha-miner-pm`、
+`alpha-miner-rd`、`alpha-miner-user` Agent 时，才读取并执行 `AGENT_ROLES.md`；角色会话内不得切换或临时越权。
+
 ## 项目概述
 A股量化因子挖掘系统。基于行为金融学理论，从市场数据中挖掘、验证、进化短线交易因子。
 

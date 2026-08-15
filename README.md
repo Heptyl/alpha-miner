@@ -10,6 +10,27 @@
 | PM / 项目负责人 | [PROJECT_STATUS.md](PROJECT_STATUS.md) | 当前进度、证据、风险、下一步 |
 | 开发维护者 | [DOCS.md](DOCS.md) | 完整架构、数据口径与技术实现 |
 
+## 普通 AI 与三角色入口
+
+直接启动 Codex/Claude 是普通工程会话，不要求激活角色：
+
+```powershell
+codex --dangerously-bypass-approvals-and-sandbox
+claude
+```
+
+需要产品治理边界时，再显式进入 PM、RD、USER；三个角色是独立会话 Agent，不在同一对话里切换：
+
+```powershell
+.\scripts\agent.ps1 pm                 # Codex：只读项目/产品治理
+.\scripts\agent.ps1 rd                 # Codex：RD 默认免审批/免沙箱
+.\scripts\agent.ps1 rd -Safe           # RD 临时恢复工作区沙箱和审批
+.\scripts\agent.ps1 user               # Codex：零审批、只读使用
+.\scripts\agent.ps1 user -Cli claude   # Claude：零审批、未授权动作直接拒绝
+```
+
+角色规则只对上述角色启动器或显式角色 Skill/Agent 生效，不影响普通 CLI 会话。PM/USER 由启动器强制使用零确认的只读权限；RD 默认使用 Codex dangerous bypass 或 Claude bypass，`-Safe` 可恢复受限模式。免审批只改变工具执行方式，不扩大任务授权；角色身份在会话内不可改变。完整边界见 [AGENT_ROLES.md](AGENT_ROLES.md)。
+
 ## 架构
 
 ```
@@ -28,7 +49,7 @@ alpha-miner/
 │   └── query.py            #   数据查询
 ├── src/
 │   ├── data/               # 数据层 (Storage + 7 个数据源采集器)
-│   ├── factors/            # 因子库 (10 公式 + 4 叙事)
+│   ├── factors/            # 因子库 (11 公式 + 4 叙事)
 │   ├── narrative/          # 叙事引擎 (新闻分类/剧本/复盘)
 │   ├── drift/              #   漂移检测 + 决策输出 (含动态 Regime 权重)
 │   ├── mining/             #   通用 IC 进化 + 涨停事件专用进化
@@ -38,7 +59,7 @@ alpha-miner/
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
 ├── config/                 # factors.yaml + settings.yaml.example + recommend.yaml
 ├── scripts/                # 日常任务 + Windows/SSH 远程计算与数据发布
-├── tests/                  # 404 passed + 2 skipped
+├── tests/                  # 405 passed + 2 skipped
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -54,12 +75,13 @@ alpha-miner/
 | turnover_rank | 股票 | 换手率百分位排名 |
 | lhb_institution | 股票 | 龙虎榜机构净买入额排名 |
 
-### 涨停结构因子 (5)
+### 涨停结构因子 (6)
 
 | 因子 | 角色 | 可操作含义 |
 |------|------|------------|
 | zt_seal_strength | alpha | 早封、少炸板、封单承接强，进入候选排序 |
 | zt_relay_quality | alpha | 连板高度与封板、换手、板块、资金共同确认 |
+| zt_reseal_quality | alpha | 1-3 次开板后回封，识别有限分歧后重新形成合力 |
 | zt_sector_breadth | alpha | 同行业多股涨停，区分板块共振与孤立涨停 |
 | zt_capital_confirmation | alpha | 主力净流入相对成交额确认涨停强度 |
 | zt_break_risk | filter | 晚封、多次炸板、封单弱时降权或直接回避 |
@@ -184,9 +206,9 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 测试（404 passed + 2 skipped）
+## 测试（405 passed + 2 skipped）
 
-覆盖数据采集、14 个注册因子、涨停可成交标签/结构进化/操作闸门、IC 端到端、手术台、
+覆盖数据采集、15 个注册因子、涨停可成交标签/结构进化/操作闸门、IC 端到端、手术台、
 策略、漂移、报告和 Windows UTF-8 可移植性。2026-08-14 全量回归通过。
 
 ## Quick Start
@@ -248,7 +270,8 @@ uv run python -m cli collect --today
 `.server-runtime`，服务器自动使用离线运行时，无需服务器 root 权限或公网访问。
 
 默认进化参数为 10 代、每代 16 个候选、16 个并发 worker。可在服务器上通过
-`ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、`ALPHA_MINER_WORKERS` 调整。
+Windows 当前进程的 `ALPHA_MINER_GENERATIONS`、`ALPHA_MINER_POPULATION`、
+`ALPHA_MINER_WORKERS` 调整，远程脚本会校验并转发。
 一致性快照位于 `X:\alpha-miner\reports\alpha_miner.snapshot.db`。
 如果服务器行情访问依赖代理，设置标准 `HTTP_PROXY`/`HTTPS_PROXY`，并设置
 `ALPHA_MINER_USE_PROXY=1` 让腾讯会话继承代理。若暂时无法直采，在 Windows 完成

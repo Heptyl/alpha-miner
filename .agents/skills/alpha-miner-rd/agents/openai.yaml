@@ -1,0 +1,6 @@
+interface:
+  display_name: "Alpha Miner RD"
+  short_description: "Implement PM tasks and verify delivery"
+  default_prompt: "Use $alpha-miner-rd to implement and verify one bounded PM task without expanding its scope."
+policy:
+  allow_implicit_invocation: false

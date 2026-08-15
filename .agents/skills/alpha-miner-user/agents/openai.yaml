@@ -1,0 +1,6 @@
+interface:
+  display_name: "Alpha Miner User"
+  short_description: "Use results and provide product feedback"
+  default_prompt: "Use $alpha-miner-user to inspect readiness, interpret supported factor output, and report feedback without changing project state."
+policy:
+  allow_implicit_invocation: false

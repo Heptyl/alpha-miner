@@ -2,6 +2,15 @@
 
 > 面向“拿系统分析股票并辅助次日操作”的使用者。技术实现请不要从这里展开。
 
+## 先以 USER Agent 打开
+
+```powershell
+.\scripts\agent.ps1 user                 # Codex
+.\scripts\agent.ps1 user -Cli claude     # Claude Code
+```
+
+两个 USER 入口都不需要点击工具审批：Codex 使用 `read-only + never`，Claude 使用 `dontAsk`，越权动作会直接失败而不是弹窗。USER 仍是固定只读身份：可以查看状态、解释因子、分析系统支持的场景并提交反馈，不能改代码、更新数据库或跑进化。若要开发或重跑进化，请退出当前会话，再用 `rd` 启动新会话；在 USER 对话里要求“临时切换”会被拒绝。
+
 ## 当前能不能用
 
 能用于盘后研究和生成观察名单；截至 2026-08-14，涨停候选因子尚未通过实盘闸门，不能据此买入。
@@ -11,29 +20,36 @@
 uv run python -m cli zt status
 ```
 
-## 每天只运行这一条
+## 每天只看两条
 
-交易日 15:40 后，在项目目录运行：
+交易日 15:40 后，数据应先由定时任务或 RD/运维流程更新。USER Agent 只运行只读命令：
+
+```powershell
+uv run python -m cli zt status
+uv run python -m cli zt scan
+```
+
+如果状态中的数据日期不是最新交易日，停止使用结果并提交 `USER_FEEDBACK`，不要在 USER 会话中补采数据。开发者本人需要维护数据时，应退出并进入 RD：
+
+```powershell
+.\scripts\agent.ps1 rd
+```
+
+人类使用者在 Agent 之外直接维护自己的本地运行库时，仍可手工运行下面的产品命令；这不会扩大 USER Agent 的只读权限：
 
 ```powershell
 uv run python -m cli zt daily
 ```
 
-它依次完成当日数据采集、因子计算和次日操作卡。若数据已经由定时任务更新：
-
-```powershell
-uv run python -m cli zt daily --skip-collect
-```
-
-只重新查看操作卡、不更新数据：
-
-```powershell
-uv run python -m cli zt scan
-```
-
 ## 我想主动跑一次因子挖掘
 
-日常使用并不需要每天进化。推荐按下面顺序运行：
+这属于 RD 研究任务，不属于 USER 使用任务。退出 USER 会话，进入 RD，并把目标限定为“重跑、验证、报告”，不要顺带修改门槛：
+
+```powershell
+.\scripts\agent.ps1 rd -Prompt "目标：重跑涨停专项并报告证据；范围：不改准入门槛；验收：训练/验证/锁定测试、样本量和拒绝原因完整输出；非目标：不提交、不发布。"
+```
+
+RD 按下面顺序执行：
 
 1. 先更新数据并查看是否达到最低样本量：
 
@@ -77,8 +93,12 @@ uv run python -m cli zt scan
    uv run python -m cli zt scan --state X:\alpha-miner\data\limit_up_evolution.json
    ```
 
-当前只有 16 个可用信号日，低于 40 日门槛。现在可以运行挖掘观察系统行为，但继续增加代数
+剔除数据库中的非交易日污染后，当前只有 13 个可用信号日，低于 40 日门槛。现在可以运行挖掘观察系统行为，但继续增加代数
 不能替代新数据，输出仍应是 `WATCH_ONLY`。
+
+当前值得跟踪的新假设是“首板有限分歧回封”：T0 开板 1-3 次后重新封板，T1 只在开盘
+`-4%～+4%` 且可成交时进入候选。清理非交易日后，该固定基准的验证段平均收益为负，当前证据并不稳定；
+必须由后续新增交易日验证，不能据此下单。
 
 通用 IC 因子挖掘属于开发研究入口，不建议作为日常股票操作流程。确需运行时使用：
 
