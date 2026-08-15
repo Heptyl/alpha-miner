@@ -87,6 +87,15 @@ factors:
       适中换手、封单比例和开板风险联合评分。分数高仅代表进入候选排序，
       不能绕过次日开盘涨幅与一字板过滤。数据源：zt_pool + daily_price。
 
+  zt_reseal_quality:
+    cn: 回封质量
+    category: formula
+    desc: 1-3次开板回封，识别有分歧但重新形成合力的涨停
+    detail: >-
+      涨停事件级因子。开板 1-3 次时取正分，2 次附近最高；零开板不等同于回封，
+      反复炸板也不加分。它来自当前历史样本中的“有限分歧后回封”研究假设，
+      必须配合次日开盘价格与锁定测试使用，不能单独作为买入信号。数据源：zt_pool。
+
   zt_sector_breadth:
     cn: 板块扩散
     category: formula

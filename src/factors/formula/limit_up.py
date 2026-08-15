@@ -55,11 +55,31 @@ def build_limit_up_features(
     turnover = turnover.fillna(turnover_fallback).fillna(0)
     seal_amount = _numeric(zt, "seal_amount", 0)
 
+    result["raw_seal_amount_available"] = seal_amount.gt(0)
+    result["raw_first_seal_available"] = (
+        zt.get("first_seal_time", pd.Series("", index=zt.index))
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\D", "", regex=True)
+        .str.len()
+        .eq(6)
+    )
+    result["raw_turnover_available"] = _numeric(zt, "turnover_rate", np.nan).notna()
+
     result["board_height"] = board_raw.div(5).clip(0, 1)
     result["board_count"] = board_raw
     result["open_count"] = open_raw
     result["turnover_rate_raw"] = turnover
     result["seal_stability"] = 1.0 / (1.0 + open_raw.clip(lower=0))
+    result["reseal_quality"] = pd.Series(
+        np.where(
+            open_raw.between(1, 3),
+            1.0 - (open_raw - 2).abs() * 0.25,
+            0.0,
+        ),
+        index=index,
+        dtype=float,
+    )
     result["seal_ratio"] = seal_amount.div(circulation).div(0.02).clip(0, 1).fillna(0)
     first_time = zt.get("first_seal_time", pd.Series("", index=zt.index))
     result["first_seal"] = first_time.map(_first_seal_score)
@@ -93,8 +113,10 @@ def build_limit_up_features(
         result["capital_confirmation"] = np.tanh(
             main_net.div(amount.replace(0, np.nan)) * 10
         ).fillna(0)
+        result["raw_capital_available"] = main_net.ne(0)
     else:
         result["capital_confirmation"] = 0.0
+        result["raw_capital_available"] = False
 
     result["break_risk"] = (
         open_raw.div(5).clip(0, 1) * 0.50
@@ -138,6 +160,12 @@ class LimitUpRelayQualityFactor(_LimitUpFeatureFactor):
     name = "zt_relay_quality"
     feature_name = "relay_quality"
     description = "连板接力质量：高度、封板、换手、板块宽度、资金确认的结构组合"
+
+
+class LimitUpResealQualityFactor(_LimitUpFeatureFactor):
+    name = "zt_reseal_quality"
+    feature_name = "reseal_quality"
+    description = "回封质量：1-3 次开板回封，区别于零开板与反复炸板"
 
 
 class LimitUpSectorBreadthFactor(_LimitUpFeatureFactor):

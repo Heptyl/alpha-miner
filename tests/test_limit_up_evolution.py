@@ -11,6 +11,7 @@ from src.mining.limit_up_evolution import (
     LimitUpGenome,
     TradeStats,
     describe_genome,
+    describe_rule,
 )
 
 
@@ -55,7 +56,7 @@ def _build_limit_up_db(path) -> Storage:
                     "seal_amount": 40_000_000,
                     "first_seal_time": "093000",
                     "last_seal_time": "093000",
-                    "open_count": 0,
+                    "open_count": 2,
                     "zt_stats": "2/2",
                 },
                 {
@@ -109,6 +110,7 @@ def test_new_limit_up_features_are_structural_and_interpretable(tmp_path):
     assert values.loc["000001", "relay_quality"] > values.loc["000002", "relay_quality"]
     assert values.loc["000001", "break_risk"] < values.loc["000002", "break_risk"]
     assert values.loc["000001", "sector_breadth"] > values.loc["000002", "sector_breadth"]
+    assert values.loc["000001", "reseal_quality"] > values.loc["000003", "reseal_quality"]
 
 
 def test_genome_description_and_mutation_bounds(tmp_path):
@@ -121,13 +123,17 @@ def test_genome_description_and_mutation_bounds(tmp_path):
         weights={"seal_stability": 0.6, "break_risk": -0.4},
         min_board=3,
         max_board=3,
+        min_open_count=1,
+        max_open_count=3,
     )
 
     assert "封板稳定" in describe_genome(parent)
     assert "-开板风险" in describe_genome(parent)
+    assert "T0开板1-3次" in describe_rule(parent)
     for index in range(100):
         child = engine._mutate(parent, generation=1, index=index)
         assert child.max_board >= child.min_board
+        assert child.max_open_count >= child.min_open_count
 
 
 def test_fitness_penalizes_one_trade_validation_winners(tmp_path):
@@ -149,7 +155,37 @@ def test_fitness_penalizes_one_trade_validation_winners(tmp_path):
 
 
 def test_event_dataset_uses_next_open_and_t_plus_one_exit(tmp_path):
-    _build_limit_up_db(tmp_path / "limit.db")
+    db = _build_limit_up_db(tmp_path / "limit.db")
+    db.insert(
+        "daily_price",
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": code,
+                    "trade_date": "2024-01-06",
+                    "open": 10,
+                    "high": 11,
+                    "low": 9,
+                    "close": 10,
+                    "volume": 1000,
+                    "amount": 10_000,
+                }
+                for code in ("000001", "000002", "000003", "000004")
+            ]
+        ),
+    )
+    db.insert(
+        "zt_pool",
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "000001",
+                    "trade_date": "2024-01-06",
+                    "consecutive_zt": 1,
+                }
+            ]
+        ),
+    )
     engine = LimitUpEvolutionEngine(
         db_path=str(tmp_path / "limit.db"),
         state_path=str(tmp_path / "state.json"),
@@ -159,11 +195,20 @@ def test_event_dataset_uses_next_open_and_t_plus_one_exit(tmp_path):
     events, summary = engine.build_event_dataset()
 
     assert summary["signal_dates"] >= 3
+    assert "reseal_quality" in summary["active_features"]
+    assert "market_heat" in summary["inactive_features"]
+    assert summary["source_coverage"]["seal_amount"] == 1.0
+    assert summary["excluded_non_trading_dates"] == ["2024-01-06"]
+    assert "2024-01-06" not in set(events["signal_date"])
     good = events[events["stock_code"] == "000001"]
     bad = events[events["stock_code"] == "000002"]
     assert good["return_1"].mean() > 0
     assert bad["return_1"].mean() < 0
     assert (good["buy_date"] > good["signal_date"]).all()
+    tied_genome = LimitUpGenome(name="tied", weights={}, top_n=2)
+    assert engine._trade_stats(events, tied_genome) == engine._trade_stats(
+        events.sample(frac=1, random_state=7), tied_genome
+    )
 
 
 def test_unvalidated_evolution_only_outputs_watch_or_avoid(tmp_path):

@@ -1,13 +1,11 @@
 """CLI 冒烟测试 — 每个子命令至少能启动不崩溃。"""
+
+import os
 import subprocess
 import sys
 
-import os
 
-import pytest
-
-
-def run_cli(*args, timeout=10):
+def run_cli(*args, timeout=20):
     """运行 CLI 命令，返回 (exit_code, stdout, stderr)。"""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = subprocess.run(

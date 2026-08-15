@@ -24,6 +24,7 @@ from src.factors.formula.limit_up import build_limit_up_features
 GENE_FEATURES = (
     "board_height",
     "seal_stability",
+    "reseal_quality",
     "seal_ratio",
     "first_seal",
     "turnover_quality",
@@ -37,6 +38,7 @@ GENE_FEATURES = (
 FEATURE_LABELS = {
     "board_height": "连板高度",
     "seal_stability": "封板稳定",
+    "reseal_quality": "有限分歧回封",
     "seal_ratio": "封单占流通盘",
     "first_seal": "首次封板早",
     "turnover_quality": "换手适中",
@@ -50,12 +52,26 @@ FEATURE_LABELS = {
 
 def describe_genome(genome: "LimitUpGenome", limit: int = 4) -> str:
     """Return the dominant, human-readable structure of a genome."""
-    ranked = sorted(genome.weights.items(), key=lambda item: abs(item[1]), reverse=True)
+    ranked = sorted(
+        ((feature, weight) for feature, weight in genome.weights.items() if abs(weight) > 1e-6),
+        key=lambda item: abs(item[1]),
+        reverse=True,
+    )
     parts = []
     for feature, weight in ranked[:limit]:
         operator = "+" if weight >= 0 else "-"
         parts.append(f"{operator}{FEATURE_LABELS.get(feature, feature)}×{abs(weight):.2f}")
     return " ".join(parts).lstrip("+")
+
+
+def describe_rule(genome: "LimitUpGenome") -> str:
+    """Return the executable event and entry constraints of a genome."""
+    return (
+        f"{genome.min_board}-{genome.max_board}板；T0开板{genome.min_open_count}-"
+        f"{genome.max_open_count}次；T1开盘{genome.min_entry_gap:.0f}%~"
+        f"{genome.max_entry_gap:.0f}%；持有{genome.holding_days}个完整交易日；"
+        f"每日Top{genome.top_n}"
+    )
 
 
 @dataclass
@@ -64,6 +80,7 @@ class LimitUpGenome:
     weights: dict[str, float]
     min_board: int = 1
     max_board: int = 6
+    min_open_count: int = 0
     max_open_count: int = 6
     min_entry_gap: float = -4.0
     max_entry_gap: float = 5.0
@@ -148,6 +165,7 @@ class LimitUpEvolutionEngine:
         self.min_market_rows = min_market_rows
         self.min_signal_dates = min_signal_dates
         self.random = random.Random(seed)
+        self.active_features = set(GENE_FEATURES)
 
     def run(self, generations: int = 5, population_size: int = 24) -> LimitUpOutcome:
         if generations < 1 or population_size < 4:
@@ -156,7 +174,10 @@ class LimitUpEvolutionEngine:
         if events.empty:
             return LimitUpOutcome([], summary, None)
 
-        population = self._initial_population(population_size)
+        self.active_features = set(summary.get("active_features", GENE_FEATURES))
+        population = [
+            self._sanitize_genome(genome) for genome in self._initial_population(population_size)
+        ]
         all_evaluations: list[LimitUpEvaluation] = []
         seen: set[str] = set()
         for generation in range(1, generations + 1):
@@ -171,7 +192,12 @@ class LimitUpEvolutionEngine:
                 generation_evaluations.append(evaluation)
                 all_evaluations.append(evaluation)
             generation_evaluations.sort(key=lambda item: item.fitness, reverse=True)
-            population = self._next_population(generation_evaluations, population_size, generation)
+            population = [
+                self._sanitize_genome(genome)
+                for genome in self._next_population(
+                    generation_evaluations, population_size, generation
+                )
+            ]
 
         all_evaluations.sort(key=lambda item: item.fitness, reverse=True)
         best = next((item for item in all_evaluations if item.accepted), None)
@@ -189,6 +215,16 @@ class LimitUpEvolutionEngine:
             price = dedup_latest(price)
             if price.empty:
                 return pd.DataFrame(), {"error": "daily_price empty"}
+            price_weekday = pd.to_datetime(price["trade_date"], errors="coerce").dt.weekday.lt(5)
+            ignored_price_dates = sorted(
+                price.loc[~price_weekday, "trade_date"].dropna().astype(str).unique().tolist()
+            )
+            price = price.loc[price_weekday].copy()
+            if price.empty:
+                return pd.DataFrame(), {
+                    "error": "daily_price has no trading-day rows",
+                    "excluded_non_trading_dates": ignored_price_dates,
+                }
             counts = price.groupby("trade_date")["stock_code"].nunique()
             dates = sorted(counts[counts >= self.min_market_rows].index.tolist())
             price_index = price.set_index(["trade_date", "stock_code"]).sort_index()
@@ -196,6 +232,13 @@ class LimitUpEvolutionEngine:
 
             zt = self.db.query("zt_pool", datetime.now(), bypass_snapshot=True)
             zt = dedup_latest(zt)
+            ignored_signal_dates: list[str] = []
+            if not zt.empty:
+                zt_weekday = pd.to_datetime(zt["trade_date"], errors="coerce").dt.weekday.lt(5)
+                ignored_signal_dates = sorted(
+                    zt.loc[~zt_weekday, "trade_date"].dropna().astype(str).unique().tolist()
+                )
+                zt = zt.loc[zt_weekday].copy()
             frames: list[pd.DataFrame] = []
             usable_dates: list[str] = []
             for signal_date in sorted(zt["trade_date"].unique()) if not zt.empty else []:
@@ -264,7 +307,29 @@ class LimitUpEvolutionEngine:
                 "last_signal_date": unique_dates[-1] if unique_dates else None,
                 "minimum_signal_dates": self.min_signal_dates,
                 "data_ready": len(unique_dates) >= self.min_signal_dates,
+                "excluded_non_trading_dates": sorted(
+                    set(ignored_price_dates) | set(ignored_signal_dates)
+                ),
             }
+            quality, active = self._feature_quality(events, unique_dates)
+            summary["feature_quality"] = quality
+            summary["active_features"] = active
+            summary["inactive_features"] = [
+                feature for feature in GENE_FEATURES if feature not in active
+            ]
+            coverage_columns = {
+                "seal_amount": "raw_seal_amount_available",
+                "first_seal_time": "raw_first_seal_available",
+                "turnover_rate": "raw_turnover_available",
+                "fund_flow": "raw_capital_available",
+            }
+            source_coverage = {}
+            for label, column in coverage_columns.items():
+                values = events.get(column, pd.Series(0, index=events.index))
+                source_coverage[label] = round(
+                    float(pd.to_numeric(values, errors="coerce").fillna(0).mean()), 4
+                )
+            summary["source_coverage"] = source_coverage
             return events, summary
         finally:
             self.db.backtest_mode = old_mode
@@ -279,6 +344,100 @@ class LimitUpEvolutionEngine:
     @staticmethod
     def _calendar_gap(left: str, right: str) -> int:
         return (datetime.fromisoformat(right) - datetime.fromisoformat(left)).days
+
+    @staticmethod
+    def _feature_quality(events: pd.DataFrame, dates: list[str]) -> tuple[dict, list[str]]:
+        """Detect genes that can actually distinguish stocks on historical signal days."""
+        if events.empty:
+            return {}, []
+        minimum_days = max(3, math.ceil(len(dates) * 0.25))
+        seal_coverage = float(
+            pd.to_numeric(
+                events.get("raw_seal_amount_available", pd.Series(0, index=events.index)),
+                errors="coerce",
+            )
+            .fillna(0)
+            .mean()
+        )
+        seal_time_coverage = float(
+            pd.to_numeric(
+                events.get("raw_first_seal_available", pd.Series(0, index=events.index)),
+                errors="coerce",
+            )
+            .fillna(0)
+            .mean()
+        )
+        development_dates = set(dates[: max(1, int(len(dates) * 0.80))])
+        test_dates = set(dates[max(1, int(len(dates) * 0.80)) :])
+        quality: dict[str, dict] = {}
+        active: list[str] = []
+
+        def spread(frame: pd.DataFrame, feature: str) -> tuple[int, float | None]:
+            daily_spreads = []
+            for _, group in frame.groupby("signal_date"):
+                group = group[[feature, "return_1"]].dropna()
+                if len(group) < 4 or group[feature].nunique() < 2:
+                    continue
+                lower = float(group[feature].quantile(0.30))
+                upper = float(group[feature].quantile(0.70))
+                if lower >= upper:
+                    lower = float(group[feature].min())
+                    upper = float(group[feature].max())
+                low_returns = group.loc[group[feature] <= lower, "return_1"]
+                high_returns = group.loc[group[feature] >= upper, "return_1"]
+                if low_returns.empty or high_returns.empty:
+                    continue
+                daily_spreads.append(
+                    float(high_returns.mean()) - float(low_returns.mean())
+                )
+            if not daily_spreads:
+                return 0, None
+            return len(daily_spreads), round(float(np.mean(daily_spreads)), 4)
+
+        for feature in GENE_FEATURES:
+            if feature not in events:
+                quality[feature] = {"active": False, "reason": "字段缺失"}
+                continue
+            within_days = int(
+                events.groupby("signal_date")[feature].nunique(dropna=True).gt(1).sum()
+            )
+            unique_values = int(events[feature].nunique(dropna=True))
+            dev_days, dev_spread = spread(
+                events[events["signal_date"].isin(development_dates)], feature
+            )
+            test_days, test_spread = spread(
+                events[events["signal_date"].isin(test_dates)], feature
+            )
+            if feature == "market_heat":
+                reason = "日内常量，不能改变当日股票排序"
+                is_active = False
+            elif feature == "break_risk" and min(seal_coverage, seal_time_coverage) < 0.50:
+                reason = "封单/封板时间覆盖不足，风险语义不完整"
+                is_active = False
+            elif within_days < minimum_days:
+                reason = f"仅 {within_days} 个信号日有横截面差异，低于 {minimum_days} 日"
+                is_active = False
+            else:
+                reason = "可参与演化"
+                is_active = True
+                active.append(feature)
+            consistent = bool(
+                dev_spread is not None
+                and test_spread is not None
+                and dev_spread * test_spread > 0
+            )
+            quality[feature] = {
+                "active": is_active,
+                "reason": reason,
+                "unique_values": unique_values,
+                "variation_days": within_days,
+                "development_spread": dev_spread,
+                "development_days": dev_days,
+                "test_spread": test_spread,
+                "test_days": test_days,
+                "direction_consistent": consistent,
+            }
+        return quality, active
 
     def _evaluate(
         self,
@@ -314,6 +473,7 @@ class LimitUpEvolutionEngine:
             return TradeStats()
         eligible = events[
             events["board_count"].between(genome.min_board, genome.max_board)
+            & (events["open_count"] >= genome.min_open_count)
             & (events["open_count"] <= genome.max_open_count)
             & events["entry_gap"].between(genome.min_entry_gap, genome.max_entry_gap)
             & ~events["unbuyable"].astype(bool)
@@ -323,9 +483,14 @@ class LimitUpEvolutionEngine:
         eligible = eligible.dropna(subset=[return_column])
         if eligible.empty:
             return TradeStats()
-        eligible["gene_score"] = self.score_frame(eligible, genome)
+        # Quantize before ranking so supported NumPy/Pandas versions make the
+        # same Top-N decision when floating-point sums differ below 1e-10.
+        eligible["gene_score"] = self.score_frame(eligible, genome).round(10)
         selected = (
-            eligible.sort_values(["signal_date", "gene_score"], ascending=[True, False])
+            eligible.sort_values(
+                ["signal_date", "gene_score", "stock_code"],
+                ascending=[True, False, True],
+            )
             .groupby("signal_date", group_keys=False)
             .head(genome.top_n)
         )
@@ -375,6 +540,8 @@ class LimitUpEvolutionEngine:
         # learns toward broader evidence before it optimizes headline return.
         score -= max(0, 30 - train.trades) * 0.08
         score -= max(0, 10 - validation.trades) * 0.25
+        if train.trades < 30 or validation.trades < 10:
+            score -= 3.0
         return score
 
     def _rejection_reasons(
@@ -403,6 +570,23 @@ class LimitUpEvolutionEngine:
 
     def _initial_population(self, population_size: int) -> list[LimitUpGenome]:
         seeds = [
+            LimitUpGenome(
+                "zt_first_board_controlled_reseal",
+                self._weights(
+                    reseal_quality=0.40,
+                    turnover_quality=0.15,
+                    liquidity_rank=0.15,
+                    sector_breadth=0.15,
+                    capital_confirmation=0.15,
+                ),
+                min_board=1,
+                max_board=1,
+                min_open_count=1,
+                max_open_count=3,
+                min_entry_gap=-4,
+                max_entry_gap=4,
+                top_n=5,
+            ),
             LimitUpGenome(
                 "zt_first_board_seal_confirm",
                 self._weights(
@@ -482,6 +666,7 @@ class LimitUpEvolutionEngine:
                     weights=self._normalize(weights),
                     min_board=self.random.choice([1, 1, 2]),
                     max_board=self.random.choice([3, 4, 6]),
+                    min_open_count=self.random.choice([0, 0, 1, 2]),
                     max_open_count=self.random.choice([2, 4, 6]),
                     max_entry_gap=self.random.choice([2.0, 3.0, 5.0]),
                     holding_days=self.random.choice([1, 2]),
@@ -501,6 +686,18 @@ class LimitUpEvolutionEngine:
     def _normalize(weights: dict[str, float]) -> dict[str, float]:
         scale = sum(abs(value) for value in weights.values()) or 1.0
         return {key: round(value / scale, 6) for key, value in weights.items()}
+
+    def _sanitize_genome(self, genome: LimitUpGenome) -> LimitUpGenome:
+        genome.weights = self._normalize(
+            {
+                feature: genome.weights.get(feature, 0.0)
+                if feature in self.active_features
+                else 0.0
+                for feature in GENE_FEATURES
+            }
+        )
+        genome.min_open_count = max(0, min(genome.min_open_count, genome.max_open_count))
+        return genome
 
     def _next_population(
         self,
@@ -533,12 +730,24 @@ class LimitUpEvolutionEngine:
             min_board,
             min(8, parent.max_board + self.random.choice([-1, 0, 1])),
         )
+        min_open_count = max(
+            0,
+            min(
+                parent.max_open_count,
+                parent.min_open_count + self.random.choice([-1, 0, 0, 1]),
+            ),
+        )
+        max_open_count = max(
+            min_open_count,
+            min(10, parent.max_open_count + self.random.choice([-1, 0, 1])),
+        )
         return LimitUpGenome(
             name=f"zt_evo_g{generation + 1}_m{index + 1}",
             weights=self._normalize(weights),
             min_board=min_board,
             max_board=max_board,
-            max_open_count=max(0, min(10, parent.max_open_count + self.random.choice([-1, 0, 1]))),
+            min_open_count=min_open_count,
+            max_open_count=max_open_count,
             min_entry_gap=parent.min_entry_gap,
             max_entry_gap=max(1, min(8, parent.max_entry_gap + self.random.choice([-1, 0, 1]))),
             holding_days=self.random.choice([parent.holding_days, 1, 2]),
@@ -564,7 +773,11 @@ class LimitUpEvolutionEngine:
             weights=self._normalize(weights),
             min_board=min(left.min_board, right.min_board),
             max_board=max(left.max_board, right.max_board),
-            max_open_count=min(left.max_open_count, right.max_open_count),
+            min_open_count=max(left.min_open_count, right.min_open_count),
+            max_open_count=max(
+                max(left.min_open_count, right.min_open_count),
+                min(left.max_open_count, right.max_open_count),
+            ),
             min_entry_gap=max(left.min_entry_gap, right.min_entry_gap),
             max_entry_gap=min(left.max_entry_gap, right.max_entry_gap),
             holding_days=self.random.choice([left.holding_days, right.holding_days]),
@@ -581,6 +794,7 @@ class LimitUpEvolutionEngine:
                 "weights": {key: round(value, 4) for key, value in sorted(genome.weights.items())},
                 "min_board": genome.min_board,
                 "max_board": genome.max_board,
+                "min_open_count": genome.min_open_count,
                 "max_open_count": genome.max_open_count,
                 "min_entry_gap": genome.min_entry_gap,
                 "max_entry_gap": genome.max_entry_gap,
@@ -642,6 +856,7 @@ class LimitUpEvolutionEngine:
         genome = evaluation.genome
         eligible = features[
             features["board_count"].between(genome.min_board, genome.max_board)
+            & (features["open_count"] >= genome.min_open_count)
             & (features["open_count"] <= genome.max_open_count)
         ].copy()
         eligible["score"] = self.score_frame(eligible, genome)
@@ -670,6 +885,7 @@ class LimitUpEvolutionEngine:
                     action=action,
                     score=float(row["score"]),
                     entry_rule=(
+                        f"T0开板{genome.min_open_count}~{genome.max_open_count}次；"
                         f"次日开盘涨幅 {genome.min_entry_gap:.0f}%~{genome.max_entry_gap:.0f}%，"
                         "且非一字涨停；否则放弃"
                     ),

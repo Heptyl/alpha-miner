@@ -147,7 +147,30 @@ $remoteAction = switch ($Action) {
     default { 'status' }
 }
 
-ssh $SshTarget "cd '$RemoteRoot' && bash scripts/server_run.sh $remoteAction"
+$forwardedEnv = @()
+foreach ($name in @(
+    'ALPHA_MINER_GENERATIONS',
+    'ALPHA_MINER_POPULATION',
+    'ALPHA_MINER_WORKERS'
+)) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        continue
+    }
+    if ($value -notmatch '^[1-9]\d*$') {
+        throw "$name must be a positive integer before it can be forwarded"
+    }
+    $forwardedEnv += "$name=$value"
+}
+$remoteEnvPrefix = if ($forwardedEnv.Count -gt 0) {
+    ($forwardedEnv -join ' ') + ' '
+} else {
+    ''
+}
+
+$remoteCommand = "cd '$RemoteRoot' && $remoteEnvPrefix" +
+    "bash scripts/server_run.sh $remoteAction"
+ssh $SshTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) {
     throw "remote command failed with exit code $LASTEXITCODE"
 }

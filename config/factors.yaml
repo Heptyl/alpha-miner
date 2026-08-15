@@ -58,6 +58,14 @@ formula_factors:
     role: alpha
     lookback_days: 1
 
+  - name: zt_reseal_quality
+    class: LimitUpResealQualityFactor
+    module: src.factors.formula.limit_up
+    description: "1-3次开板回封结构，区别于零开板和反复炸板"
+    factor_type: stock
+    role: alpha
+    lookback_days: 1
+
   - name: zt_sector_breadth
     class: LimitUpSectorBreadthFactor
     module: src.factors.formula.limit_up
