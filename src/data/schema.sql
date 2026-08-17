@@ -333,3 +333,24 @@ CREATE TABLE IF NOT EXISTS narrative_archetype (
 
 CREATE INDEX IF NOT EXISTS idx_narrative_archetype_code ON narrative_archetype(stock_code);
 CREATE INDEX IF NOT EXISTS idx_narrative_archetype_date ON narrative_archetype(trade_date);
+
+-- 统一玩法卡：USER 只读的唯一预计算结果面。
+CREATE TABLE IF NOT EXISTS play_cards (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    play_id               TEXT NOT NULL,
+    play_name             TEXT NOT NULL,
+    behavior_logic        TEXT NOT NULL,
+    signal_trade_date     TEXT NOT NULL,
+    candidates_json       TEXT NOT NULL,
+    trigger_rule          TEXT NOT NULL,
+    abandon_rule          TEXT NOT NULL,
+    exit_rule             TEXT NOT NULL,
+    historical_evidence_json TEXT NOT NULL,
+    paper_status          TEXT NOT NULL,
+    admission_status      TEXT NOT NULL,
+    generated_at          TEXT NOT NULL,
+    UNIQUE(play_id, signal_trade_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_play_cards_signal_date
+    ON play_cards(signal_trade_date, play_id);

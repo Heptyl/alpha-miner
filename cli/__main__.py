@@ -55,6 +55,11 @@ if __name__ == "__main__":
     elif sub == "recommend":
         from cli.recommend import main
         main()
+    elif sub == "play":
+        # USER read-only entry must not require writable bytecode caches.
+        sys.dont_write_bytecode = True
+        from cli.play import main
+        main()
     elif sub == "help":
         print("Usage: python -m cli <command> [args]")
         print()
@@ -70,6 +75,7 @@ if __name__ == "__main__":
         print("  limit-up 涨停板因子进化与次日操作卡")
         print("  signal    次日选股信号")
         print("  recommend 每日个股推荐(含买入点位)")
+        print("  play      只读查看预计算PAPER玩法卡")
         print("  query     查询股票数据/市场概览")
         print("  daily     每日完整流程 (跨平台, 替代 daily_run.sh)")
     else:

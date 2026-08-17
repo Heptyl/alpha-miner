@@ -25,6 +25,8 @@ from src.mining.limit_up_evolution import (
     describe_genome,
     describe_rule,
 )
+from src.mining.playbook import save_play_card
+from src.mining.plays import build_three_to_four_card, settle_three_to_four_cards
 
 console = Console()
 
@@ -80,6 +82,21 @@ def collect_cmd(db_path: str):
     console.print(f"采集返回：{sum(counts.values())} 条")
     if check.failed:
         raise click.ClickException(f"涨停历史采集告警：{check.detail}")
+    if check.status == "ok":
+        try:
+            settled_cards = settle_three_to_four_cards(db)
+            for settled_card in settled_cards:
+                save_play_card(db, settled_card)
+        except Exception as exc:
+            raise click.ClickException(f"三进四PAPER模拟交易结算失败：{exc}") from exc
+        if settled_cards:
+            console.print(f"PAPER模拟交易已结算：{len(settled_cards)} 张历史玩法卡")
+        try:
+            card = build_three_to_four_card(db, signal_date=today)
+            save_play_card(db, card)
+        except Exception as exc:
+            raise click.ClickException(f"三进四PAPER玩法卡生成失败：{exc}") from exc
+        console.print(f"PAPER玩法卡已更新：{card.play_name}（{card.signal_trade_date}）")
 
 
 @main.command("daily")
