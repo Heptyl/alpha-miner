@@ -18,7 +18,7 @@ def _print_user_help() -> None:
     print("  zt status                    详细数据诊断")
     print("  report --brief --holdings    持仓检查")
     print()
-    print("其他命令属于RD/后台流程，仍兼容但不在USER帮助中公开。")
+    print("其他维护命令属于RD/后台流程；已退役命令会返回 Unknown command。")
 
 if __name__ == "__main__":
     _configure_non_tty_utf8()
@@ -41,35 +41,8 @@ if __name__ == "__main__":
     elif sub in ("mine", "evolve"):
         from cli.mine import main
         main()
-    elif sub == "drift":
-        from cli.drift import main
-        main()
-    elif sub == "backtest":
-        from cli.backtest import main
-        main()
-    elif sub == "script":
-        from cli.report import main_script
-        main_script()
-    elif sub == "replay":
-        from cli.replay import main
-        main()
-    elif sub == "daily":
-        from cli.daily import main
-        main()
-    elif sub == "strategy":
-        from cli.strategy import main
-        main()
     elif sub in ("limit-up", "zt"):
         from cli.limit_up import main
-        main()
-    elif sub == "signal":
-        from cli.signal import main
-        main()
-    elif sub == "query":
-        from cli.query import main
-        main()
-    elif sub == "recommend":
-        from cli.recommend import main
         main()
     elif sub == "play":
         # USER read-only entry must not require writable bytecode caches.

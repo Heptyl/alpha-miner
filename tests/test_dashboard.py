@@ -1,187 +1,127 @@
-"""主控制台 dashboard 的行为测试 — 参数白名单校验 / 串行任务执行 / 页面渲染。
+"""Strict retirement contracts for the removed legacy dashboard product surface."""
 
-不绑定端口、不发 HTTP 请求：直接测 build_argv / JobRunner / render_page，
-子进程用当前解释器跑微型 python -c 片段，几百毫秒内结束。
-"""
-
-import json
-import sqlite3
+import importlib.util
+import os
+import subprocess
 import sys
-import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import pytest
 
-import dashboard  # noqa: E402
-
-
-# ---------------- 命令白名单与参数校验 ----------------
-
-def test_command_ids_unique():
-    ids = [c["id"] for c in dashboard.COMMANDS]
-    assert len(ids) == len(set(ids))
+ROOT = Path(__file__).resolve().parent.parent
+RETIRED_COMMANDS = ("recommend", "signal", "strategy", "query")
 
 
-def test_build_argv_substitutes_dates():
-    cmd = dashboard.CMD_BY_ID["drift"]
-    argv, err = dashboard.build_argv(cmd, {"date": "2026-06-05"})
-    assert err == ""
-    assert "2026-06-05" in argv
-    assert "{date}" not in " ".join(argv)
+def _run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_NUM_THREADS"] = "1"
+    env.pop("PYTHONIOENCODING", None)
+    env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-m", "cli", *args],
+        cwd=cwd or ROOT,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        timeout=20,
+        check=False,
+    )
 
 
-def test_build_argv_rejects_bad_date():
-    cmd = dashboard.CMD_BY_ID["drift"]
-    argv, err = dashboard.build_argv(cmd, {"date": "2026-6-5; rm -rf /"})
-    assert argv is None and "date" in err
+def test_dashboard_module_path_is_retired():
+    assert not (ROOT / "scripts" / "dashboard.py").exists()
 
 
-def test_build_argv_rejects_unknown_factor():
-    cmd = dashboard.CMD_BY_ID["gate"]
-    argv, err = dashboard.build_argv(
-        cmd, {"factor": "evil_$(whoami)", "date": "2026-06-05"})
-    assert argv is None and "因子" in err
+def test_dashboard_launcher_path_is_retired():
+    assert not (ROOT / "dashboard.bat").exists()
 
 
-def test_build_argv_accepts_registered_factor():
-    cmd = dashboard.CMD_BY_ID["gate"]
-    argv, err = dashboard.build_argv(
-        cmd, {"factor": "lhb_institution", "date": "2026-06-05"})
-    assert err == ""
-    assert "lhb_institution" in argv
+def test_obsolete_cron_installer_path_is_retired():
+    assert not (ROOT / "scripts" / "setup_cron.sh").exists()
 
 
-def test_build_argv_requires_all_params():
-    cmd = dashboard.CMD_BY_ID["checkup"]
-    argv, err = dashboard.build_argv(cmd, {"start": "2026-04-01"})
-    assert argv is None and "end" in err
+@pytest.mark.parametrize("command", RETIRED_COMMANDS)
+def test_deleted_cli_module_specs_are_absent(command):
+    assert importlib.util.find_spec(f"cli.{command}") is None
 
 
-# ---------------- 任务执行器 ----------------
-
-def _wait_done(runner, timeout=15.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        st = runner.status(0)
-        if not st["running"]:
-            return st
-        time.sleep(0.05)
-    raise AssertionError("job did not finish in time")
+def test_root_dispatch_has_no_retired_routes():
+    source = (ROOT / "cli" / "__main__.py").read_text(encoding="utf-8")
+    for command in RETIRED_COMMANDS:
+        assert f'elif sub == "{command}"' not in source
+        assert f"from cli.{command} import main" not in source
 
 
-def test_job_runner_captures_output_and_rc():
-    runner = dashboard.JobRunner(dashboard.ROOT)
-    ok, _ = runner.start("echo", ["-c", "print('hello-from-job')"])
-    assert ok
-    st = _wait_done(runner)
-    assert st["status"] == "done" and st["rc"] == 0
-    assert any("hello-from-job" in ln for ln in st["lines"])
+@pytest.mark.parametrize("command", RETIRED_COMMANDS)
+def test_retired_root_commands_fail_closed(command):
+    result = _run_cli(command)
+    assert result.returncode == 2
+    assert result.stdout == ""
 
 
-def test_job_runner_rejects_concurrent_jobs():
-    runner = dashboard.JobRunner(dashboard.ROOT)
-    ok, _ = runner.start("slow", ["-c", "import time; time.sleep(8)"])
-    assert ok
-    ok2, msg = runner.start("second", ["-c", "print(1)"])
-    assert not ok2 and "忙" in msg
-    runner.stop()
-    st = _wait_done(runner)
-    assert st["status"] in ("done", "failed")   # 被终止 → 非0退出，如实呈现
+@pytest.mark.parametrize("command", RETIRED_COMMANDS)
+def test_retired_route_errors_name_command_and_help(command):
+    result = _run_cli(command, "--help")
+    assert result.returncode == 2
+    assert f"Unknown command: {command}" in result.stderr
+    assert "python -m cli --help" in result.stderr
 
 
-def test_job_runner_reports_failure():
-    runner = dashboard.JobRunner(dashboard.ROOT)
-    runner.start("fail", ["-c", "import sys; sys.exit(3)"])
-    st = _wait_done(runner)
-    assert st["status"] == "failed" and st["rc"] == 3
+def test_user_help_excludes_every_retired_command():
+    result = _run_cli("--help")
+    assert result.returncode == 0, result.stderr
+    for command in RETIRED_COMMANDS:
+        assert command not in result.stdout
 
 
-def test_status_since_returns_incremental_lines():
-    runner = dashboard.JobRunner(dashboard.ROOT)
-    runner.start("multi", ["-c", "print('L1'); print('L2'); print('L3')"])
-    st = _wait_done(runner)
-    total = st["next"]
-    assert total >= 3
-    tail = runner.status(total - 1)
-    assert len(tail["lines"]) == 1
+def test_default_cli_remains_read_only(tmp_path):
+    result = _run_cli(cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "data").exists()
+    assert not (tmp_path / "reports").exists()
 
 
-# ---------------- 页面渲染 ----------------
-
-def test_render_page_contains_commands_and_cn_factors():
-    page = dashboard.render_page()
-    assert "一键每日全流程" in page
-    assert "机构买入" in page          # 因子中文名出现
-    assert "lhb_institution" in page   # 英文名同样可见
-    assert "风控过滤" in page          # 决策D role 中文化
-    for c in dashboard.COMMANDS:       # 每个白名单命令都有按钮（主按钮或折叠区）
-        assert f"runCmd('{c['id']}')" in page
+def test_explicit_play_remains_read_only(tmp_path):
+    result = _run_cli("play", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "data").exists()
+    assert not (tmp_path / "reports").exists()
 
 
-def test_render_page_has_health_banner_and_brief_iframe():
-    page = dashboard.render_page()
-    assert 'class="banner' in page          # 健康横幅存在
-    assert any(ic in page for ic in ("🟢", "🟡", "🔴"))   # 三色灯之一
-    assert 'id="briefframe"' in page        # 简报内嵌 iframe
-    for cid in dashboard.PRIMARY_IDS:        # 四个主按钮都在首屏
-        assert cid in page
+def test_zt_route_remains_available():
+    result = _run_cli("zt", "--help")
+    assert result.returncode == 0, result.stderr
+    assert "collect" in result.stdout
+    assert "status" in result.stdout
 
 
-# ---------------- 系统健康判断 ----------------
-
-def test_system_state_bad_when_db_missing(monkeypatch, tmp_path):
-    monkeypatch.setattr(dashboard, "DB_PATH", tmp_path / "nope.db")
-    st = dashboard.system_state()
-    assert st["level"] == "bad" and "不存在" in st["verdict"]
-
-
-def test_system_state_flags_mining_silence(monkeypatch, tmp_path):
-    """挖掘日志最后记录超阈值 → bad，verdict 点名静默天数。"""
-    from datetime import date, datetime, timedelta
-
-    # 构造一个有数据但挖掘早已静默的 fixture DB
-    db = tmp_path / "t.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE daily_price (trade_date TEXT)")
-    conn.execute("INSERT INTO daily_price VALUES (?)", (date.today().isoformat(),))
-    conn.execute("CREATE TABLE regime_state (trade_date TEXT, regime_type TEXT)")
-    conn.commit(); conn.close()
-
-    log = tmp_path / "mining.jsonl"
-    old = (datetime.now() - timedelta(days=40)).isoformat()
-    log.write_text(json.dumps({"timestamp": old, "name": "x"}) + "\n", encoding="utf-8")
-
-    monkeypatch.setattr(dashboard, "DB_PATH", db)
-    monkeypatch.setattr(dashboard, "MINING_LOG", log)
-    st = dashboard.system_state(date.today())
-    assert st["level"] == "bad"
-    assert "静默" in st["verdict"]
+def test_report_route_remains_available():
+    result = _run_cli("report", "--help")
+    assert result.returncode == 0, result.stderr
+    assert "--brief" in result.stdout
+    assert "--holdings" in result.stdout
 
 
-def test_system_state_ok_when_fresh(monkeypatch, tmp_path):
-    from datetime import date, datetime
+def test_mine_route_remains_available():
+    result = _run_cli("mine", "--help")
+    assert result.returncode == 0, result.stderr
 
-    db = tmp_path / "t.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE daily_price (trade_date TEXT)")
-    conn.execute("INSERT INTO daily_price VALUES (?)", (date.today().isoformat(),))
-    conn.execute("CREATE TABLE regime_state (trade_date TEXT, regime_type TEXT)")
-    conn.execute("INSERT INTO regime_state VALUES (?, ?)",
-                 (date.today().isoformat(), "normal"))
-    conn.commit(); conn.close()
 
-    log = tmp_path / "mining.jsonl"
-    log.write_text(json.dumps({"timestamp": datetime.now().isoformat()}) + "\n",
-                   encoding="utf-8")
-    brief = tmp_path / "latest.html"
-    brief.write_text("<html></html>", encoding="utf-8")
+def test_retired_operational_routes_are_unregistered_and_fail_closed():
+    source = (ROOT / "cli" / "__main__.py").read_text(encoding="utf-8")
+    for command in ("daily", "backtest", "drift", "script", "replay"):
+        assert f'sub == "{command}"' not in source
+        result = _run_cli(command, "--help")
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert f"Unknown command: {command}" in result.stderr
 
-    monkeypatch.setattr(dashboard, "DB_PATH", db)
-    monkeypatch.setattr(dashboard, "MINING_LOG", log)
-    monkeypatch.setattr(dashboard, "BRIEF_LATEST", brief)
-    st = dashboard.system_state(date.today())
-    assert st["level"] == "ok"
-    # 状态条覆盖关键维度
-    keys = {i["k"] for i in st["items"]}
-    assert {"行情数据", "挖掘管线"} <= keys
+
+def test_maintenance_guide_records_retirement_and_keeps_holdings_report():
+    guide = (ROOT / "USER_GUIDE.md").read_text(encoding="utf-8")
+    assert "已退役" in guide
+    for command in RETIRED_COMMANDS:
+        assert f"`{command}`" in guide
+    assert 'report --brief --holdings "600000,000001"' in guide

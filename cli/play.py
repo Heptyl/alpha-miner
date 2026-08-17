@@ -8,6 +8,7 @@ import json
 import math
 import sqlite3
 import sys
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,100 +36,45 @@ class ReadOnlyPlayCardDatabase:
             connection.close()
 
 
-def _admission_label(card: Any) -> str:
-    if card.admission_status == "NOT_ADMITTED":
-        return "PAPER/未准入（模拟记录，不是实盘建议）"
-    if card.admission_status == "ADMISSION_ELIGIBLE":
-        return "PAPER/准入候选（仍需负责人验收）"
-    return "PAPER/已准入"
+_SHANGHAI = timezone(timedelta(hours=8))
+_POST_CLOSE = (15, 40)
+
+
+def _status_text(card: Any) -> str:
+    position = (
+        "实盘仓位0"
+        if card.admission_status != "ADMITTED"
+        else "实盘仓位按准入规则"
+    )
+    evidence = card.historical_evidence
+    research = evidence.get("research_status")
+    usage = evidence.get("usage_status")
+    prefix = (
+        f"{research or '未标注'}/{usage or '未标注'}｜"
+        if research or usage
+        else ""
+    )
+    return f"{prefix}PAPER/{card.paper_status}｜{card.admission_status}｜{position}｜不是实盘建议"
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
     code = str(candidate.get("stock_code") or "未知代码")
     name = str(candidate.get("stock_name") or "")
     board_count = candidate.get("board_count")
-    known = {
-        "stock_code",
-        "stock_name",
-        "board_count",
-        "paper_status",
-        "result_trade_date",
-        "result_reason",
-        "entry_trade_date",
-        "entry_price",
-        "entry_proxy",
-        "exit_trade_date",
-        "exit_price",
-        "exit_proxy",
-        "total_cost_bps",
-        "net_return_pct",
-        "industry",
-        "signal_close",
-        "allowed_open_low",
-        "allowed_open_high",
-        "previous_zt_breadth",
-        "current_zt_breadth",
-        "signal_amount",
-        "selection_reason",
-        "abandon_conditions",
-        "entry_gap_pct",
-    }
-    suffix = f"，{board_count}板" if board_count is not None else ""
-    extras = {key: value for key, value in candidate.items() if key not in known}
-    extra_text = (
-        "，" + json.dumps(extras, ensure_ascii=False, sort_keys=True)
-        if extras
-        else ""
-    )
+    suffix = f"（{board_count}板）" if board_count is not None else ""
     if "allowed_open_low" in candidate and "allowed_open_high" in candidate:
-        details = (
-            f"，{candidate.get('industry') or '未知行业'}，D收盘"
-            f"{_format_candidate_number(candidate.get('signal_close'))}，"
-            f"D+1允许开盘{_format_candidate_number(candidate.get('allowed_open_low'))}–"
-            f"{_format_candidate_number(candidate.get('allowed_open_high'))}，"
+        reason = candidate.get("selection_reason") or "预注册条件成立"
+        return (
+            f"{code} {name}（{candidate.get('industry') or '未知行业'}；"
+            f"D收盘{_format_candidate_number(candidate.get('signal_close'))}；"
+            f"允许开盘{_format_candidate_number(candidate.get('allowed_open_low'))}–"
+            f"{_format_candidate_number(candidate.get('allowed_open_high'))}；"
             f"宽度{candidate.get('previous_zt_breadth')}→"
-            f"{candidate.get('current_zt_breadth')}，"
-            f"D成交额{_format_candidate_number(candidate.get('signal_amount'))}；"
-            f"为何入选：{candidate.get('selection_reason') or '预注册条件成立'}"
-        )
-        return f"{code} {name}{details}{extra_text}".strip()
-    return f"{code} {name}{suffix}{extra_text}".strip()
-
-
-def _candidate_action(candidate: dict[str, Any]) -> str:
-    status = str(candidate.get("paper_status") or "PLANNED")
-    reason = str(candidate.get("result_reason") or "")
-    if status == "NOT_TRIGGERED":
-        return f"未触发：{reason or 'D日条件未成立'}"
-    if status == "UNFILLED":
-        return f"未成交：{reason or 'D日代理不可成交'}"
-    if status == "TRIGGERED":
-        exit_plan = (
-            "计划D+3开盘（入场后的第二个后续开盘）模拟卖出"
-            if candidate.get("allowed_open_low") is not None
-            else "计划D+1开盘模拟卖出"
-        )
-        return (
-            f"已模拟买入：{candidate.get('entry_trade_date') or 'D日'} @ "
-            f"{_format_candidate_number(candidate.get('entry_price'))}；{exit_plan}"
-        )
-    if status == "COMPLETED":
-        return (
-            f"模拟买入：{candidate.get('entry_trade_date') or 'D日'} @ "
-            f"{_format_candidate_number(candidate.get('entry_price'))}；"
-            f"模拟卖出：{candidate.get('exit_trade_date') or 'D+1'} @ "
-            f"{_format_candidate_number(candidate.get('exit_price'))}；"
-            f"成本后收益：{_format_signed_percent(candidate.get('net_return_pct'))}"
-        )
-    if candidate.get("allowed_open_low") is not None:
-        return (
-            "明日模拟动作：若开盘位于预设[-2%, +5%]区间且非涨停开盘，"
-            "则按开盘价模拟买入；否则自动记录未成交"
-        )
-    return (
-        "明日模拟动作：若四板开板回封且代理可成交，则按涨停价模拟买入；"
-        "否则自动记录未触发/未成交"
-    )
+            f"{candidate.get('current_zt_breadth')}；"
+            f"成交额{_format_candidate_number(candidate.get('signal_amount'))}；"
+            f"为何入选：{reason}）"
+        ).strip()
+    return f"{code} {name}{suffix}".strip()
 
 
 def _format_candidate_number(value: Any) -> str:
@@ -143,41 +89,64 @@ def _format_signed_percent(value: Any) -> str:
     return "暂无"
 
 
-def _evidence_text(evidence: dict[str, Any]) -> str:
-    labels = {
-        "signal_days": "信号日",
-        "candidate_count": "历史候选",
-        "proxy_trigger_count": "代理触发",
-        "completed_count": "已完成",
-        "unfinished_count": "未完成",
-        "untradable_count": "不可成交",
-        "trigger_rate": "触发率",
-        "win_rate": "胜率",
-        "avg_net_return_pct": "平均成本后收益",
-        "profit_loss_ratio": "盈亏比",
-        "max_drawdown_pct": "最大回撤",
-        "total_cost_bps": "成本",
-        "metrics_available": "指标可用",
-        "entry_proxy": "入场代理",
-        "exit_proxy": "退出代理",
-        "data_limitations": "数据限制",
-        "research_status": "研究状态",
-        "usage_status": "用途状态",
-        "independent_signal_days": "development独立收益日",
-        "development_mean_net_return_pct": "development D+3开盘成本后均值",
-        "development_ci95_pct": "development 95%置信区间",
-        "holm_significant": "Holm校正显著",
-        "late_period_mean_net_return_pct": "development后段均值",
-        "current_candidate_count": "本日候选",
-        "previous_day_audit_source": "前一交易日证据来源",
-        "empty_reason": "本日0候选原因",
-    }
-    ordered = [key for key in labels if key in evidence]
-    ordered.extend(sorted(key for key in evidence if key not in labels))
-    return "\n".join(
-        f"  - {labels.get(key, key)}：{_format_evidence_value(key, evidence[key])}"
-        for key in ordered
-    )
+def _evidence_lines(evidence: dict[str, Any]) -> list[str]:
+    counts = []
+    for key, label in (
+        ("signal_days", "信号日"),
+        ("candidate_count", "候选"),
+        ("proxy_trigger_count", "代理触发"),
+        ("completed_count", "已完成"),
+        ("unfinished_count", "未完成"),
+        ("untradable_count", "不可成交"),
+        ("independent_signal_days", "development独立收益日"),
+    ):
+        if key in evidence:
+            counts.append(f"{label}{_format_evidence_value(key, evidence[key])}")
+    lines = ["历史开发证据：" + "｜".join(counts)] if counts else []
+
+    metrics = []
+    for key, label in (
+        ("trigger_rate", "触发率"),
+        ("win_rate", "胜率"),
+        ("avg_net_return_pct", "平均成本后收益"),
+        ("profit_loss_ratio", "盈亏比"),
+        ("max_drawdown_pct", "最大回撤"),
+        ("development_mean_net_return_pct", "D+3开盘成本后均值"),
+        ("development_ci95_pct", "95%CI"),
+        ("holm_significant", "Holm显著"),
+        ("late_period_mean_net_return_pct", "后段均值"),
+    ):
+        if key in evidence:
+            value = (
+                _win_rate_text(evidence)
+                if key == "win_rate"
+                else _format_evidence_value(key, evidence[key])
+            )
+            metrics.append(f"{label}{value}")
+    if metrics:
+        lines.append("历史开发指标：" + "｜".join(metrics))
+
+    limitations = evidence.get("data_limitations")
+    boundary = "样本/holdout不足或未记录；仅作PAPER验证，未证明统计优势。"
+    if isinstance(limitations, str) and limitations.strip():
+        boundary += " " + limitations.replace("metrics_available=false", "指标不可用")
+    lines.append("证据结论：" + boundary)
+    return lines
+
+
+def _win_rate_text(evidence: dict[str, Any]) -> str:
+    formatted = _format_evidence_value("win_rate", evidence.get("win_rate"))
+    wins = evidence.get("win_count")
+    trades = evidence.get("evaluated_count")
+    if _is_non_negative_integer(wins) and _is_non_negative_integer(trades):
+        if int(trades) > 0 and int(wins) <= int(trades):
+            audited_rate = int(wins) / int(trades) * 100
+            return f"{audited_rate:.2f}%（{int(wins)}/{int(trades)}）"
+    return f"{formatted}（分子/分母未记录）"
+
+
+def _is_non_negative_integer(value: Any) -> bool:
+    return _is_finite_number(value) and float(value).is_integer() and float(value) >= 0
 
 
 def _format_evidence_value(key: str, value: Any) -> str:
@@ -235,36 +204,137 @@ def _is_finite_number(value: Any) -> bool:
     )
 
 
-def _print_card(card: Any, index: int) -> None:
-    print(f"\n===== 玩法卡 {index} =====")
-    print(f"玩法：{card.play_name}")
-    print(f"行为逻辑：{card.behavior_logic}")
-    print(f"数据日：{card.signal_trade_date}")
-    print(f"PAPER/准入：{_admission_label(card)}")
-    research_status = card.historical_evidence.get("research_status")
-    usage_status = card.historical_evidence.get("usage_status")
-    if research_status or usage_status:
-        print(
-            "研究边界："
-            f"{research_status or '未标注'} / {usage_status or '未标注'} / "
-            f"{card.admission_status}"
+def _data_health(database: ReadOnlyPlayCardDatabase, card: Any) -> str:
+    try:
+        rows = database.execute(
+            """
+            SELECT status, attempted_at
+            FROM limit_up_collection_runs
+            WHERE trade_date = ?
+            ORDER BY attempted_at DESC, id DESC
+            LIMIT 1
+            """,
+            (card.signal_trade_date,),
         )
-    print("候选：")
+    except sqlite3.Error:
+        return "无法验证（采集审计表未具备）"
+    if not rows:
+        return "无法验证（该数据日没有采集审计）"
+    row = rows[0]
+    if row.get("status") != "ok":
+        return f"无法验证（最新采集审计状态{row.get('status') or '未知'}）"
+    if not _is_post_close_audit(card.signal_trade_date, row.get("attempted_at")):
+        return "无法验证（最新成功审计未满足15:40盘后门槛）"
+    source = card.historical_evidence.get("previous_day_audit_source")
+    suffix = f"；前一交易日来源{source}" if source else ""
+    return f"已验证（最新采集审计ok且满足盘后门槛{suffix}）"
+
+
+def _is_post_close_audit(trade_date: str, attempted_at: Any) -> bool:
+    try:
+        signal_day = date.fromisoformat(trade_date)
+        attempted = datetime.fromisoformat(str(attempted_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    local = (
+        attempted.replace(tzinfo=_SHANGHAI)
+        if attempted.tzinfo is None
+        else attempted.astimezone(_SHANGHAI)
+    )
+    if local.date() != signal_day:
+        return local.date() > signal_day
+    return (local.hour, local.minute) >= _POST_CLOSE
+
+
+def _future_market_dates(
+    database: ReadOnlyPlayCardDatabase, signal_trade_date: str
+) -> list[str]:
+    try:
+        rows = database.execute(
+            """
+            SELECT DISTINCT trade_date
+            FROM daily_price
+            WHERE trade_date > ?
+            ORDER BY trade_date
+            LIMIT 3
+            """,
+            (signal_trade_date,),
+        )
+    except sqlite3.Error:
+        return []
+    return [str(row["trade_date"]) for row in rows if row.get("trade_date")]
+
+
+def _plan_dates(card: Any, future_dates: list[str]) -> str:
+    entry = future_dates[0] if future_dates else "下一交易日（绝对日期未具备）"
+    exit_index = 2 if card.play_id == "theme_new_entrant_diffusion_v1" else 1
+    if len(future_dates) > exit_index:
+        exit_date = future_dates[exit_index]
+    elif exit_index == 2:
+        exit_date = "入场后的第二个后续交易日（绝对日期未具备）"
+    else:
+        exit_date = "入场后的下一交易日（绝对日期未具备）"
+    return f"模拟入场{entry}；模拟卖出{exit_date}"
+
+
+def _entry_text(card: Any) -> str:
+    if card.play_id == "three_to_four_reseal":
+        return (
+            "满足触发后按D日涨停收盘价代理记录；这是盘后研究/成交审计代理，"
+            "不是盘中人工买点"
+        )
+    return "满足触发后按下一交易日开盘价记录PAPER模拟买入"
+
+
+def _print_card(card: Any, database: ReadOnlyPlayCardDatabase) -> None:
+    print(f"玩法：{card.play_name}")
+    print(f"状态：{_status_text(card)}")
+    print(f"数据日：{card.signal_trade_date}｜数据健康：{_data_health(database, card)}")
+    print(f"行为逻辑：{card.behavior_logic}")
     if card.candidates:
-        for candidate in card.candidates:
-            print(f"  - {_candidate_text(candidate)}")
-            print(f"    {_candidate_action(candidate)}")
+        candidates = "；".join(_candidate_text(candidate) for candidate in card.candidates)
+        print(f"候选（{len(card.candidates)}只）：{candidates}")
     else:
         reason = card.historical_evidence.get("empty_reason")
-        if reason:
-            print(f"  - 本日0只符合条件的PAPER候选：{reason}")
-        else:
-            print("  - 今日暂无符合条件的PAPER候选")
+        print(f"候选（0只）：{reason or '本日没有符合预注册条件的PAPER候选'}")
+    future_dates = _future_market_dates(database, card.signal_trade_date)
+    print(f"计划日期：{_plan_dates(card, future_dates)}")
     print(f"触发：{card.trigger_rule}")
     print(f"放弃：{card.abandon_rule}")
-    print(f"卖出：{card.exit_rule}")
-    print("历史证据：")
-    print(_evidence_text(card.historical_evidence))
+    print(f"模拟入场：{_entry_text(card)}")
+    print(f"模拟卖出：{card.exit_rule}")
+    cost = _format_evidence_value(
+        "total_cost_bps", card.historical_evidence.get("total_cost_bps")
+    )
+    print(f"成本：{cost}")
+    for line in _evidence_lines(card.historical_evidence):
+        print(line)
+
+
+def _completed_results(cards: list[Any]) -> list[tuple[Any, dict[str, Any]]]:
+    return [
+        (card, candidate)
+        for card in cards
+        for candidate in card.candidates
+        if candidate.get("paper_status") == "COMPLETED"
+    ]
+
+
+def _print_recent_results(cards: list[Any]) -> None:
+    completed = _completed_results(cards)
+    if not completed:
+        print("最近PAPER结果：尚无card lifecycle COMPLETED结果；不会用历史开发样本冒充结算")
+        return
+    print("最近PAPER结果（仅card lifecycle COMPLETED）：")
+    for card, candidate in completed:
+        print(
+            f"  {card.signal_trade_date} {_candidate_text(candidate)}｜"
+            f"模拟买入{candidate.get('entry_trade_date') or '日期缺失'} @ "
+            f"{_format_candidate_number(candidate.get('entry_price'))}｜"
+            f"模拟卖出{candidate.get('exit_trade_date') or '日期缺失'} @ "
+            f"{_format_candidate_number(candidate.get('exit_price'))}｜"
+            f"成本后收益{_format_signed_percent(candidate.get('net_return_pct'))}"
+        )
 
 
 def run(db_path: str) -> int:
@@ -273,26 +343,21 @@ def run(db_path: str) -> int:
     if not path.is_file():
         print(WAITING_MESSAGE)
         return 0
+    database = ReadOnlyPlayCardDatabase(path)
     try:
-        latest_cards, result_cards = _load_play_card_sections(
-            ReadOnlyPlayCardDatabase(path)
-        )
+        latest_cards, result_cards = _load_play_card_sections(database)
     except (KeyError, OSError, TypeError, ValueError, sqlite3.Error):
         print(WAITING_MESSAGE)
         return 0
     if not latest_cards:
         print(WAITING_MESSAGE)
         return 0
-    print("Alpha Miner 今日预计算玩法")
-    print("\n=== 今日计划 ===")
-    for index, card in enumerate(latest_cards, 1):
-        _print_card(card, index)
-    if result_cards:
-        print("\n=== 最近PAPER结果 ===")
-        for index, card in enumerate(result_cards, 1):
-            _print_card(card, index)
-    else:
-        print("\n首批PAPER计划尚未到结算日；下一成功采集后自动更新结果")
+    print("Alpha Miner PAPER玩法（只读预计算）")
+    print("\n今日计划")
+    for card in latest_cards:
+        _print_card(card, database)
+    print()
+    _print_recent_results(latest_cards + result_cards)
     return 0
 
 

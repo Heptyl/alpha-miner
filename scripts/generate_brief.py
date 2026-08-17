@@ -383,7 +383,6 @@ def _drift_cards(ic_by_factor: dict[str, list[float]], today: date,
                        f"，该因子可能正在失效",
                 "actions": [
                     f"uv run python -m cli.mine surgery --factor {name}   # 解剖 IC 序列",
-                    f"uv run python -m cli.drift --date {today.isoformat()}   # 完整漂移报告",
                     f"# 确认失效后可在 config/factors.yaml 中将 {name} 的 role 改为 filter 或移除",
                 ],
             })
@@ -444,7 +443,6 @@ def _failure_cards(cfg: BriefConfig, today: date,
                    f"{'、'.join(stale_tables)}（按工作日近似，未剔除节假日）",
             "actions": [
                 "uv run python -m cli.collect --today",
-                "bash scripts/daily_run.sh   # 或补跑完整每日流程",
             ],
         })
     else:

@@ -49,7 +49,16 @@ class TestCLISmoke:
         assert "详细数据诊断" in out
         assert "持仓检查" in out
         assert not any(marker in out for marker in ("ÈÕ", "æ—", "ç”"))
-        for hidden in ("collect", "mine", "drift", "backtest", "strategy", "recommend"):
+        for hidden in (
+            "collect",
+            "mine",
+            "drift",
+            "backtest",
+            "strategy",
+            "recommend",
+            "signal",
+            "query",
+        ):
             assert hidden not in out
 
     def test_unknown_command_is_nonzero_and_points_to_help(self):
@@ -76,20 +85,26 @@ class TestCLISmoke:
         code, out, err = run_cli("mine", "--help")
         assert code == 0, f"mine --help 失败:\n{err}"
 
-    def test_drift_help(self):
-        """drift --help。"""
-        code, out, err = run_cli("drift", "--help")
-        assert code == 0, f"drift --help 失败:\n{err}"
-
-    def test_backtest_help(self):
-        """backtest --help。"""
-        code, out, err = run_cli("backtest", "--help")
-        assert code == 0, f"backtest --help 失败:\n{err}"
-
-    def test_strategy_help(self):
-        """strategy --help。"""
-        code, out, err = run_cli("strategy", "--help")
-        assert code == 0, f"strategy --help 失败:\n{err}"
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "recommend",
+            "signal",
+            "strategy",
+            "query",
+            "daily",
+            "backtest",
+            "drift",
+            "script",
+            "replay",
+        ],
+    )
+    def test_retired_root_commands_are_unknown(self, command):
+        code, out, err = run_cli(command, "--help")
+        assert code == 2
+        assert out == ""
+        assert f"Unknown command: {command}" in err
+        assert "python -m cli --help" in err
 
     def test_limit_up_help_lists_collection_loop(self):
         """zt --help 应暴露严格采集与状态入口。"""
@@ -98,18 +113,8 @@ class TestCLISmoke:
         assert "collect" in out
         assert "status" in out
 
-    def test_strategy_list(self):
-        """strategy list 必须输出策略列表。"""
+    def test_retired_strategy_subcommand_is_unknown(self):
         code, out, err = run_cli("strategy", "list")
-        assert code == 0, f"strategy list 失败:\n{err}"
-        assert len(out.strip()) > 0, "strategy list 输出为空"
-
-    def test_replay_help(self):
-        """replay --help。"""
-        code, out, err = run_cli("replay", "--help")
-        assert code == 0, f"replay --help 失败:\n{err}"
-
-    def test_script_help(self):
-        """script --help。"""
-        code, out, err = run_cli("script", "--help")
-        assert code == 0, f"script --help 失败:\n{err}"
+        assert code == 2
+        assert out == ""
+        assert "Unknown command: strategy" in err

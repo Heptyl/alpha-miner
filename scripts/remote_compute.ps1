@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('sync', 'build', 'collect', 'evolve', 'evolve-limit-up', 'daily', 'snapshot', 'publish-data', 'status')]
+    [ValidateSet('sync', 'build', 'evolve', 'snapshot', 'publish-data', 'status')]
     [string]$Action = 'status',
     [string]$SshTarget = '',
     [string]$MappedRoot = 'X:\alpha-miner',
@@ -138,10 +138,7 @@ if ($Action -eq 'publish-data') {
 
 $remoteAction = switch ($Action) {
     'build' { 'build' }
-    'collect' { 'collect' }
     'evolve' { 'evolve' }
-    'evolve-limit-up' { 'evolve-limit-up' }
-    'daily' { 'daily' }
     'snapshot' { 'snapshot' }
     'publish-data' { 'activate-data' }
     default { 'status' }

@@ -41,7 +41,7 @@ python -m cli
 
 ## 开发者/后台，USER 无需执行
 
-数据采集、状态诊断、补采、远程计算、PIT 实验、进化、报告、调度安装和发布都属于 RD/后台流程。旧 CLI 命令暂时继续兼容自动化，但不会出现在 USER 默认帮助中；USER 不应运行 `status`、`scan`、`report`、`collect`、`mine`、`evolve`、`strategy`、`recommend`、补采脚本或任务安装脚本。
+数据采集、状态诊断、补采、远程计算、PIT 实验、进化、报告和发布都属于 RD/后台流程。旧根入口 `recommend`、`signal`、`strategy`、`query`、`daily`、`backtest`、`drift`、`script`、`replay` 已退役；网页 dashboard、旧每日/小时包装与旧推荐任务安装脚本也已移除。后台只需继续维护 `zt collect/status`、`mine` 和持仓报告；`cli/backtest.py` 暂作为涨停内部计算依赖保留，但不再是根命令。远程 `evolve` 只生成 `DEVELOPMENT_ONLY` 候选，不能宣称正式 holdout 或准入。USER 无需记忆或执行这些命令。
 
 授权维护者确需排查数据闭环或检查已有持仓风险时，可退出 USER 会话后分别使用 `python -m cli zt status` 或 `python -m cli report --brief --holdings "600000,000001"`。股票代码必须整体放在引号中以保留前导零；这些结果只提供诊断或背景，不替代玩法卡准入。
 

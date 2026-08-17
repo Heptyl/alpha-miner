@@ -60,30 +60,16 @@ case "$ACTION" in
       build_image
     fi
     ;;
-  collect)
-    run_python -m cli.collect --today "$@"
-    ;;
   evolve)
     generations="${ALPHA_MINER_GENERATIONS:-10}"
     population="${ALPHA_MINER_POPULATION:-16}"
     workers="${ALPHA_MINER_WORKERS:-16}"
+    echo "research_stage=DEVELOPMENT_ONLY; formal holdout/admission is not available"
     run_python -m cli.mine evolve \
       --generations "$generations" \
       --population "$population" \
       --workers "$workers" \
       "$@"
-    ;;
-  evolve-limit-up)
-    generations="${ALPHA_MINER_GENERATIONS:-5}"
-    population="${ALPHA_MINER_POPULATION:-24}"
-    run_python -m cli.limit_up evolve \
-      --generations "$generations" \
-      --population "$population" \
-      "$@"
-    ;;
-  daily)
-    workers="${ALPHA_MINER_WORKERS:-16}"
-    run_python -m cli daily --evolution-workers "$workers" "$@"
     ;;
   snapshot)
     run_python -c 'import sqlite3; from pathlib import Path; src=Path("data/alpha_miner.db"); dst=Path("reports/alpha_miner.snapshot.db"); dst.parent.mkdir(parents=True, exist_ok=True); source=sqlite3.connect(src); target=sqlite3.connect(dst); source.backup(target); target.close(); source.close(); print(dst)'
@@ -114,7 +100,8 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "usage: $0 {build|collect|evolve|evolve-limit-up|daily|snapshot|activate-data|test|python|status} [args...]" >&2
+    echo "usage: $0 {build|evolve|snapshot|activate-data|test|python|status} [args...]" >&2
+    echo "evolve is DEVELOPMENT_ONLY; it cannot claim accepted or a formal holdout result." >&2
     exit 2
     ;;
 esac

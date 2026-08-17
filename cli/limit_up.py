@@ -39,7 +39,6 @@ from src.mining.limit_up_evolution import (
 from src.mining.playbook import save_play_card
 from src.mining.plays import (
     build_theme_new_entrant_diffusion_card,
-    build_three_to_four_card,
     load_usable_audit_dates,
     settle_theme_new_entrant_diffusion_cards,
     settle_three_to_four_cards,
@@ -117,7 +116,6 @@ def collect_cmd(db_path: str):
             console.print(f"PAPER模拟交易已结算：{len(settled_cards)} 张历史玩法卡")
         try:
             cards = [
-                build_three_to_four_card(db, signal_date=today),
                 build_theme_new_entrant_diffusion_card(db, signal_date=today),
             ]
             for card in cards:

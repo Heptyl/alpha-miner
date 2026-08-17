@@ -66,9 +66,13 @@ def _card() -> PlayCard:
     )
 
 
-def _run_play(db_path: Path) -> tuple[subprocess.CompletedProcess[str], float]:
+def _run_play(
+    db_path: Path, *, python_io_encoding: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], float]:
     env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
+    env.pop("PYTHONIOENCODING", None)
+    if python_io_encoding:
+        env["PYTHONIOENCODING"] = python_io_encoding
     started = time.perf_counter()
     result = subprocess.run(
         [sys.executable, "-m", "cli", "play", "--db", str(db_path)],
@@ -88,9 +92,59 @@ def _fingerprint(path: Path) -> tuple[str, int]:
     return digest, path.stat().st_mtime_ns
 
 
+def _seed_audit(
+    storage: Storage,
+    trade_date: str = "2026-08-17",
+    *,
+    status: str = "ok",
+    attempted_at: str | None = None,
+) -> None:
+    storage.execute_write(
+        """
+        INSERT INTO limit_up_collection_runs
+            (trade_date, attempted_at, price_rows, zt_rows, status, detail)
+        VALUES (?, ?, 5000, 50, ?, '')
+        """,
+        (trade_date, attempted_at or f"{trade_date} 16:10:00", status),
+    )
+
+
+def _seed_market_date(storage: Storage, trade_date: str) -> None:
+    storage.execute_write(
+        """
+        INSERT INTO daily_price (stock_code, trade_date, close, snapshot_time)
+        VALUES (?, ?, 10.0, ?)
+        """,
+        (f"D{trade_date[-4:]}", trade_date, f"{trade_date} 16:00:00"),
+    )
+
+
+def _nonempty_lines(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.strip()]
+
+
 def test_cli_prints_complete_non_admitted_paper_without_modifying_database(tmp_path):
     storage = _storage(tmp_path)
-    save_play_card(storage, _card())
+    card = replace(
+        _card(),
+        candidates=[
+            {
+                "stock_code": "000001",
+                "stock_name": "测试甲",
+                "board_count": 3,
+                "paper_status": "PLANNED",
+            },
+            {
+                "stock_code": "000002",
+                "stock_name": "测试乙",
+                "board_count": 3,
+                "paper_status": "PLANNED",
+                "unknown_extension": {"safe": None},
+            },
+        ],
+    )
+    save_play_card(storage, card)
+    _seed_audit(storage)
     path = Path(storage.db_path)
     before = _fingerprint(path)
 
@@ -99,39 +153,39 @@ def test_cli_prints_complete_non_admitted_paper_without_modifying_database(tmp_p
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     for text in (
+        "Alpha Miner PAPER玩法（只读预计算）",
+        "今日计划",
         "玩法：三进四可成交回封",
-        "=== 今日计划 ===",
         "行为逻辑：",
-        "数据日：2026-08-17",
-        "PAPER/未准入（模拟记录，不是实盘建议）",
-        "000001 测试股，3板",
-        "明日模拟动作：若四板开板回封且代理可成交，则按涨停价模拟买入；"
-        "否则自动记录未触发/未成交",
+        "状态：PAPER/PLANNED｜NOT_ADMITTED｜实盘仓位0｜不是实盘建议",
+        "数据日：2026-08-17｜数据健康：已验证（最新采集审计ok且满足盘后门槛）",
+        "候选（2只）：000001 测试甲（3板）；000002 测试乙（3板）",
+        "计划日期：模拟入场下一交易日（绝对日期未具备）；"
+        "模拟卖出入场后的下一交易日（绝对日期未具备）",
         "触发：",
         "放弃：",
-        "卖出：",
-        "历史证据：",
-        "信号日：40",
-        "历史候选：60",
-        "代理触发：6",
-        "触发率：7.23%",
-        "胜率：55.00%",
-        "平均成本后收益：1.2000%",
-        "盈亏比：1.7201",
-        "最大回撤：6.5666%",
+        "模拟入场：满足触发后按D日涨停收盘价代理记录；"
+        "这是盘后研究/成交审计代理，不是盘中人工买点",
+        "模拟卖出：",
         "成本：20bp",
-        "指标可用：是",
-        "extension_note：暂无",
-        "extension_text：稳定展示",
-        "首批PAPER计划尚未到结算日；下一成功采集后自动更新结果",
-        "数据限制：零样本时指标不可用。",
+        "历史开发证据：信号日40｜候选60｜代理触发6",
+        "历史开发指标：触发率7.23%｜胜率55.00%（分子/分母未记录）｜"
+        "平均成本后收益1.2000%｜盈亏比1.7201｜最大回撤6.5666%",
+        "证据结论：样本/holdout不足或未记录；仅作PAPER验证，未证明统计优势。",
+        "最近PAPER结果：尚无card lifecycle COMPLETED结果；"
+        "不会用历史开发样本冒充结算",
     ):
         assert text in result.stdout
-    assert "metrics_available" not in result.stdout
-    assert "True" not in result.stdout
+    assert result.stdout.count("触发：") == 1
+    assert result.stdout.count("放弃：") == 1
+    assert result.stdout.count("模拟入场：") == 1
+    assert result.stdout.count("模拟卖出：") == 1
+    assert result.stdout.count("成本：") == 1
+    assert "unknown_extension" not in result.stdout
     assert "等待触发" not in result.stdout
     assert "观望" not in result.stdout
     assert "WATCH_ONLY" not in result.stdout
+    assert len(_nonempty_lines(result.stdout)) <= 20
     assert elapsed < 5
     assert _fingerprint(path) == before
 
@@ -181,6 +235,7 @@ def test_cli_explains_h1_candidate_and_development_boundary_read_only(tmp_path):
         generated_at="2026-08-17T16:20:00+08:00",
     )
     save_play_card(storage, card)
+    _seed_audit(storage)
     path = Path(storage.db_path)
     before = _fingerprint(path)
 
@@ -189,22 +244,24 @@ def test_cli_explains_h1_candidate_and_development_boundary_read_only(tmp_path):
     assert result.returncode == 0, result.stderr
     for text in (
         "玩法：热点扩散新强势成员（H1）",
-        "研究边界：DEVELOPMENT_CANDIDATE / PAPER_ONLY / NOT_ADMITTED",
-        "600001 通用候选，机器人，D收盘10.0000",
-        "D+1允许开盘9.8000–10.5000",
+        "状态：DEVELOPMENT_CANDIDATE/PAPER_ONLY｜PAPER/PLANNED｜NOT_ADMITTED｜"
+        "实盘仓位0｜不是实盘建议",
+        "数据健康：已验证（最新采集审计ok且满足盘后门槛；"
+        "前一交易日来源LEGACY_POST_CLOSE_SNAPSHOT）",
+        "600001 通用候选（机器人；D收盘10.0000；允许开盘9.8000–10.5000；",
         "宽度2→4",
         "为何入选：机器人涨停宽度2→4加速；本日新进入强势池；行业成交额排名1",
-        "明日模拟动作：若开盘位于预设[-2%, +5%]区间且非涨停开盘，"
-        "则按开盘价模拟买入；否则自动记录未成交",
-        "development独立收益日：12",
-        "development D+3开盘成本后均值：0.5530%",
-        "development 95%置信区间：[-0.9914%, 2.0835%]",
-        "Holm校正显著：否",
-        "development后段均值：0.1299%",
-        "前一交易日证据来源：LEGACY_POST_CLOSE_SNAPSHOT",
+        "计划日期：模拟入场下一交易日（绝对日期未具备）；"
+        "模拟卖出入场后的第二个后续交易日（绝对日期未具备）",
+        "模拟入场：满足触发后按下一交易日开盘价记录PAPER模拟买入",
+        "历史开发证据：development独立收益日12",
+        "历史开发指标：D+3开盘成本后均值0.5530%｜"
+        "95%CI[-0.9914%, 2.0835%]｜Holm显著否｜后段均值0.1299%",
+        "证据结论：样本/holdout不足或未记录；仅作PAPER验证，未证明统计优势。",
     ):
         assert text in result.stdout
     assert "WATCH_ONLY" not in result.stdout
+    assert len(_nonempty_lines(result.stdout)) <= 20
     assert elapsed < 5
     assert _fingerprint(path) == before
 
@@ -228,10 +285,68 @@ def test_cli_explains_zero_h1_candidates(tmp_path):
     result, _ = _run_play(Path(storage.db_path))
 
     assert result.returncode == 0
-    assert (
-        "本日0只符合条件的PAPER候选：本日行业涨停宽度未同时满足至少3且高于前日"
-        in result.stdout
+    assert "候选（0只）：本日行业涨停宽度未同时满足至少3且高于前日" in result.stdout
+    assert "数据健康：无法验证（该数据日没有采集审计）" in result.stdout
+
+
+def test_cli_uses_only_observed_market_dates_across_holiday(tmp_path):
+    storage = _storage(tmp_path, "calendar-output.db")
+    signal_date = "2026-09-30"
+    three_to_four = replace(
+        _card(),
+        signal_trade_date=signal_date,
+        generated_at="2026-09-30T16:20:00+08:00",
     )
+    h1 = replace(
+        three_to_four,
+        play_id="theme_new_entrant_diffusion_v1",
+        play_name="热点扩散新强势成员（H1）",
+        candidates=[
+            {
+                "stock_code": "600001",
+                "stock_name": "跨节候选",
+                "paper_status": "PLANNED",
+                "allowed_open_low": 9.8,
+                "allowed_open_high": 10.5,
+            }
+        ],
+    )
+    save_play_card(storage, three_to_four)
+    save_play_card(storage, h1)
+    _seed_audit(storage, signal_date)
+    for market_date in ("2026-10-09", "2026-10-12", "2026-10-13"):
+        _seed_market_date(storage, market_date)
+
+    result, _ = _run_play(Path(storage.db_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "计划日期：模拟入场2026-10-09；模拟卖出2026-10-12" in result.stdout
+    assert "计划日期：模拟入场2026-10-09；模拟卖出2026-10-13" in result.stdout
+    assert "2026-10-01" not in result.stdout
+
+
+def test_cli_shows_audited_win_fraction_instead_of_stored_percentage(tmp_path):
+    storage = _storage(tmp_path, "audited-wins.db")
+    evidence = dict(_card().historical_evidence)
+    evidence.update({"win_rate": 0.55, "win_count": 3, "evaluated_count": 5})
+    save_play_card(storage, replace(_card(), historical_evidence=evidence))
+
+    result, _ = _run_play(Path(storage.db_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "胜率60.00%（3/5）" in result.stdout
+    assert "胜率55.00%" not in result.stdout
+
+
+def test_cli_forces_utf8_when_parent_requests_gbk(tmp_path):
+    storage = _storage(tmp_path, "gbk-parent.db")
+    save_play_card(storage, _card())
+
+    result, _ = _run_play(Path(storage.db_path), python_io_encoding="gbk")
+
+    assert result.returncode == 0, result.stderr
+    assert "玩法：三进四可成交回封" in result.stdout
+    assert not any(marker in result.stdout for marker in ("ÈÕ", "æ—", "ç”"))
 
 
 def test_cli_shows_latest_plan_and_recent_candidate_results_read_only(tmp_path):
@@ -285,18 +400,19 @@ def test_cli_shows_latest_plan_and_recent_candidate_results_read_only(tmp_path):
 
     assert result.returncode == 0, result.stderr
     for text in (
-        "=== 今日计划 ===",
-        "=== 最近PAPER结果 ===",
-        "模拟买入：2026-08-17 @ 10.0000",
-        "模拟卖出：2026-08-18 @ 11.0000",
-        "成本后收益：+9.8000%",
-        "未触发：D日未成为四板",
-        "未成交：D日一字板，代理不可成交",
-        "已模拟买入：2026-08-17 @ 12.0000；计划D+1开盘模拟卖出",
+        "今日计划",
+        "最近PAPER结果（仅card lifecycle COMPLETED）：",
+        "2026-08-16 BUYSELL 完成股（3板）",
+        "模拟买入2026-08-17 @ 10.0000",
+        "模拟卖出2026-08-18 @ 11.0000",
+        "成本后收益+9.8000%",
     ):
         assert text in result.stdout
+    assert "NOFIRE" not in result.stdout
+    assert "NOFILL" not in result.stdout
+    assert "WAITSELL" not in result.stdout
     assert "WATCH_ONLY" not in result.stdout
-    assert "等待卖出" not in result.stdout
+    assert result.stdout.count("历史开发证据：") == 1
     assert elapsed < 5
     assert _fingerprint(path) == before
 
@@ -398,7 +514,7 @@ def _mock_collection(status: str, *, record_ok: bool = False):
     return collect
 
 
-def test_collect_success_builds_both_idempotent_cards(tmp_path, monkeypatch):
+def test_collect_success_builds_only_h1_idempotently(tmp_path, monkeypatch):
     from cli import limit_up
 
     path = tmp_path / "collect-ok.db"
@@ -415,16 +531,12 @@ def test_collect_success_builds_both_idempotent_cards(tmp_path, monkeypatch):
     )
     assert rows == [
         {
-            "play_id": "three_to_four_reseal",
-            "paper_status": "PLANNED",
-            "admission_status": "NOT_ADMITTED",
-        },
-        {
             "play_id": "theme_new_entrant_diffusion_v1",
             "paper_status": "PLANNED",
             "admission_status": "NOT_ADMITTED",
         },
     ]
+    assert not hasattr(limit_up, "build_three_to_four_card")
 
 
 def test_collect_intraday_ok_skips_settlement_and_card_generation(tmp_path, monkeypatch):
@@ -487,7 +599,7 @@ def test_collect_card_build_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise ValueError("synthetic build failure")
 
-    monkeypatch.setattr(limit_up, "build_three_to_four_card", fail)
+    monkeypatch.setattr(limit_up, "build_theme_new_entrant_diffusion_card", fail)
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
     assert result.exit_code != 0
@@ -511,12 +623,6 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
         calls.append("settle_theme")
         return []
 
-    original_build = limit_up.build_three_to_four_card
-
-    def build(storage, **kwargs):
-        calls.append("build_three_to_four")
-        return original_build(storage, **kwargs)
-
     original_theme_build = limit_up.build_theme_new_entrant_diffusion_card
 
     def build_theme(storage, **kwargs):
@@ -525,7 +631,6 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
 
     monkeypatch.setattr(limit_up, "settle_three_to_four_cards", settle_three_to_four)
     monkeypatch.setattr(limit_up, "settle_theme_new_entrant_diffusion_cards", settle_theme)
-    monkeypatch.setattr(limit_up, "build_three_to_four_card", build)
     monkeypatch.setattr(limit_up, "build_theme_new_entrant_diffusion_card", build_theme)
 
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
@@ -534,9 +639,9 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
     assert calls == [
         "settle_three_to_four",
         "settle_theme",
-        "build_three_to_four",
         "build_theme",
     ]
+    assert not hasattr(limit_up, "build_three_to_four_card")
 
 
 def test_collect_settlement_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
