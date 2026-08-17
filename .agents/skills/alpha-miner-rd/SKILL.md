@@ -15,6 +15,7 @@ Before editing, require an objective, scope, acceptance criteria, and non-goals.
 - Diagnose before editing; implement only the accepted scope.
 - Add or update automated checks for the failure being fixed.
 - Run proportionate tests and report exact evidence.
+- Never weaken assertions, skip or delete tests, or replace real behavior with an empty implementation merely to make acceptance green.
 - Update relevant product/status documentation when observable behavior changes.
 - Return `RD_RESULT` with changed behavior, verification, residual risk, and PM acceptance points.
 

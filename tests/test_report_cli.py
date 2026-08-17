@@ -13,6 +13,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORT_DATE = (date.today() - timedelta(days=1)).isoformat()
+MOJIBAKE_MARKERS = ("ÈÕ", "æ—", "ç”", "锟斤拷", "�")
 
 
 def _isolated_workspace(tmp_path: Path) -> Path:
@@ -35,10 +36,9 @@ def _run_report(
     tmp_path: Path,
     db_path: Path,
     *args: str,
-    encoding: str = "gbk",
 ) -> tuple[subprocess.CompletedProcess[bytes], str, str]:
     env = os.environ.copy()
-    env["PYTHONIOENCODING"] = encoding
+    env.pop("PYTHONIOENCODING", None)
     env["OPENBLAS_NUM_THREADS"] = "1"
     env["OMP_NUM_THREADS"] = "1"
     env["PYTHONPATH"] = os.pathsep.join(
@@ -63,7 +63,12 @@ def _run_report(
         timeout=60,
         check=False,
     )
-    return result, result.stdout.decode(encoding), result.stderr.decode(encoding)
+    stdout = result.stdout.decode("utf-8")
+    stderr = result.stderr.decode("utf-8")
+    for marker in MOJIBAKE_MARKERS:
+        assert marker not in stdout
+        assert marker not in stderr
+    return result, stdout, stderr
 
 
 def _assert_clean_exit(result: subprocess.CompletedProcess[bytes], stderr: str) -> None:
@@ -137,7 +142,7 @@ def _insert_one_sided_ic(db_path: Path) -> None:
         conn.close()
 
 
-def test_brief_gbk_stdout_and_default_read_only(tmp_path: Path):
+def test_brief_utf8_stdout_and_default_read_only(tmp_path: Path):
     db_path = _isolated_workspace(tmp_path)
     _insert_market_emotion(db_path, zt_count=100, dt_count=0, highest_board=7)
 
@@ -154,7 +159,7 @@ def test_brief_gbk_stdout_and_default_read_only(tmp_path: Path):
     assert not (tmp_path / "reports").exists()
 
 
-def test_holdings_gbk_stdout_reports_unavailable_risk(tmp_path: Path):
+def test_holdings_utf8_stdout_reports_unavailable_risk(tmp_path: Path):
     db_path = _isolated_workspace(tmp_path)
 
     result, stdout, stderr = _run_report(
@@ -198,9 +203,7 @@ def test_explicit_save_writes_rich_utf8_report(tmp_path: Path):
     _insert_one_sided_ic(db_path)
     save_path = tmp_path / "saved" / "brief.txt"
 
-    result, stdout, stderr = _run_report(
-        tmp_path, db_path, "--save", str(save_path), encoding="utf-8"
-    )
+    result, stdout, stderr = _run_report(tmp_path, db_path, "--save", str(save_path))
 
     _assert_clean_exit(result, stderr)
     assert "简报已保存" in stdout
@@ -224,9 +227,8 @@ def test_sparse_one_sided_ic_has_no_runtime_warning(tmp_path: Path):
     assert "zt_dt_ratio" in stdout
     assert "候选" in stdout
     assert "数据不足" in stdout
-    assert "[弱]" in stdout
+    assert "☁️" in stdout
+    assert "[弱]" not in stdout
     assert "趋势未知/数据不足" in stdout
     assert "趋势?" not in stdout
-    assert "☁" not in stdout
-    assert "┌" not in stdout
-    assert "+" in stdout
+    assert "┌" in stdout

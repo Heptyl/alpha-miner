@@ -1,6 +1,6 @@
 # Alpha Miner 当前架构
 
-> 唯一当前源规范，2026-08-17。历史设计仅作背景：[因子挖掘 v2](docs/archive/factor-mining-v2.md)、[策略回测升级](docs/archive/strategy-backtest-upgrade.md)、[进化引擎升级](docs/archive/evolution-engine-v2-upgrade.md)。冲突时以本文为准。
+> 唯一当前架构源规范，2026-08-18。其他文档与本文冲突时，以本文为准。
 
 ## 一句话目标
 
@@ -29,6 +29,13 @@ Windows 免费前向采集并发布带时间戳数据
 | 一种玩法卡 | 负责人只看玩法、行为逻辑、候选、模拟动作、放弃、卖出、历史证据和 PAPER/准入状态。 |
 
 Windows 负责免费数据的前向采集与发布；服务器负责离线回测和慢实验。慢任务永远不阻塞 USER。
+
+## 数据运行与发布
+
+- 服务器本地 SQLite/WAL 是离线计算的权威运行库；不得让运行进程直接读写 X 盘 SQLite。
+- X 盘只承载代码同步和只读一致性快照，不承担运行库或并发写入。
+- Windows 采集结果发布时必须用 SQLite backup API 生成一致性副本；服务器先执行 `PRAGMA quick_check`，再原子替换运行库，并保留 `alpha_miner.previous.db` 供回滚。
+- 对外快照同样由 backup API 产生；USER 只读预计算结果，采集、发布、回测和进化等慢任务不得进入 USER 请求路径。
 
 ## 大模型与程序分工
 
@@ -70,7 +77,7 @@ Windows 负责免费数据的前向采集与发布；服务器负责离线回测
 
 ## 现有实现归一与迁移
 
-`EvolutionEngine` KEEP + ADAPT，成为唯一引擎；`StrategyEvolver` 与 `LimitUpEvolutionEngine` 的有效能力 MERGE 后 RETIRE。`CandidatePool` 并入数据库证据状态，`FailureAnalyzer` 保留为统一诊断组件，`FeedbackEngine` 只追加结果。不得新增独立 CLI 或第四套引擎。
+`EvolutionEngine` KEEP + ADAPT，成为唯一引擎；`StrategyEvolver` 与 `LimitUpEvolutionEngine` 的有效能力 MERGE 后 RETIRE。`CandidatePool` 并入数据库证据状态，`FailureAnalyzer` 保留为统一诊断组件，反馈结果由 `play_cards` 追加并回流统一证据链。不得新增独立 CLI 或第四套引擎。
 
 1. **先补数据基础**：Windows 连续前向采集竞价与分钟数据，单库保存；USER 继续只读一种玩法卡。
 2. **再做前向 PAPER**：唯一引擎按上述三个玩法回测并每天自动推进模拟结果，不用盘后数据反推买点。

@@ -1,20 +1,36 @@
-"""Alpha Miner CLI 入口。
+"""Alpha Miner CLI entrypoint with one default USER path."""
 
-python -m cli collect [args]
-python -m cli report [args]
-python -m cli mine [args]
-python -m cli drift [args]
-python -m cli backtest [args]
-"""
+import sys
+
+
+def _configure_non_tty_utf8() -> None:
+    """Make redirected/agent output deterministic without changing a real console."""
+    for stream in (sys.stdout, sys.stderr):
+        if not stream.isatty() and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
+def _print_user_help() -> None:
+    print("Usage: python -m cli [command] [args]")
+    print()
+    print("USER commands:")
+    print("  play                         日常主入口（无参数时默认执行）")
+    print("  zt status                    详细数据诊断")
+    print("  report --brief --holdings    持仓检查")
+    print()
+    print("其他命令属于RD/后台流程，仍兼容但不在USER帮助中公开。")
 
 if __name__ == "__main__":
-    import sys
+    _configure_non_tty_utf8()
 
-    sub = sys.argv[1] if len(sys.argv) > 1 else "help"
+    sub = sys.argv[1] if len(sys.argv) > 1 else "play"
+
+    if sub in ("help", "--help", "-h"):
+        _print_user_help()
+        raise SystemExit(0)
 
     # Strip subcommand from argv so argparse in sub-modules works correctly
-    if sub not in ("help",):
-        sys.argv = [sys.argv[0]] + sys.argv[2:]
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
 
     if sub == "collect":
         from cli.collect import main
@@ -60,24 +76,7 @@ if __name__ == "__main__":
         sys.dont_write_bytecode = True
         from cli.play import main
         main()
-    elif sub == "help":
-        print("Usage: python -m cli <command> [args]")
-        print()
-        print("Commands:")
-        print("  collect   采集数据")
-        print("  report    生成日报/盘后简报 (--brief)")
-        print("  mine      因子进化挖掘")
-        print("  drift     漂移检测")
-        print("  backtest  回测")
-        print("  script    生成市场剧本")
-        print("  replay    复盘昨日剧本")
-        print("  strategy  策略管理 (list/backtest/evolve/scan)")
-        print("  limit-up 涨停板因子进化与次日操作卡")
-        print("  signal    次日选股信号")
-        print("  recommend 每日个股推荐(含买入点位)")
-        print("  play      只读查看预计算PAPER玩法卡")
-        print("  query     查询股票数据/市场概览")
-        print("  daily     每日完整流程 (跨平台, 替代 daily_run.sh)")
     else:
-        print(f"Unknown command: {sub}")
-        sys.exit(1)
+        print(f"Unknown command: {sub}", file=sys.stderr)
+        print("Run 'python -m cli --help' for USER commands.", file=sys.stderr)
+        raise SystemExit(2)
