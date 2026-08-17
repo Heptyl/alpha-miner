@@ -59,7 +59,7 @@ alpha-miner/
 ├── knowledge_base/         # theories.yaml (12 假说) + strategies.yaml (5 策略)
 ├── config/                 # factors.yaml + settings.yaml.example + recommend.yaml
 ├── scripts/                # 日常任务 + Windows/SSH 远程计算与数据发布
-├── tests/                  # 405 passed + 2 skipped
+├── tests/                  # 离线回归 407 passed + 2 skipped（另 7 个 live 测试）
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -114,10 +114,23 @@ T0 收盘涨停事件
 日常用户只运行：
 
 ```powershell
-uv run python -m cli zt daily              # 盘后采集→算因子→次日操作卡
+uv run python -m cli zt collect            # 定时采集入口；缺采/异常时返回非零
+uv run python -m cli zt daily              # 手工盘后采集→审计→算因子→次日操作卡
 uv run python -m cli zt daily --skip-collect  # 数据已有定时任务更新
-uv run python -m cli zt status             # 一眼查看数据与实盘闸门
+uv run python -m cli zt status             # 数据连续性、采集告警与实盘闸门
 ```
+
+Windows 计划任务脚本会在工作日 16:10 采集、18:10 同日重试，并在每次采集后运行严格状态检查。
+安装会修改本机任务计划，因此必须由维护者明确执行；普通测试或状态查看不会自动安装：
+
+```powershell
+.\scripts\setup_limit_up_task.ps1 -Action show
+.\scripts\setup_limit_up_task.ps1 -Action install
+```
+
+每次尝试都会写入 `limit_up_collection_runs`。`zt status` 会持续显示全市场行情已存在但涨停池
+缺失的日期、1～200 行之外的异常日、超过 4 个自然日的采集断档，以及尚未被同日成功重试关闭的失败。
+这些数据质量阈值只触发采集告警，不参与、也不放宽因子准入门槛。
 
 ## 进化引擎 v2
 
@@ -206,10 +219,10 @@ python -m cli strategy scan --date 2026-04-14                        # 当日信
 | CUSUM | 递归变点检测，因子 IC 结构性断裂 |
 | Regime | 市场状态 (连板潮 / 题材轮动 / 地量 / 普涨跌 / 正常) |
 
-## 测试（405 passed + 2 skipped）
+## 测试（离线 407 passed + 2 skipped，7 live deselected）
 
 覆盖数据采集、15 个注册因子、涨停可成交标签/结构进化/操作闸门、IC 端到端、手术台、
-策略、漂移、报告和 Windows UTF-8 可移植性。2026-08-14 全量回归通过。
+策略、漂移、报告和 Windows UTF-8 可移植性。2026-08-15 离线全量回归通过。
 
 ## Quick Start
 

@@ -13,7 +13,7 @@
 
 ## 当前能不能用
 
-能用于盘后研究和生成观察名单；截至 2026-08-14，涨停候选因子尚未通过实盘闸门，不能据此买入。
+能用于盘后研究和生成观察名单；截至 2026-08-15，涨停候选因子尚未通过实盘闸门，不能据此买入。
 先运行下面这条命令，看到“已通过”前都保持 0 仓位：
 
 ```powershell
@@ -29,7 +29,8 @@ uv run python -m cli zt status
 uv run python -m cli zt scan
 ```
 
-如果状态中的数据日期不是最新交易日，停止使用结果并提交 `USER_FEEDBACK`，不要在 USER 会话中补采数据。开发者本人需要维护数据时，应退出并进入 RD：
+如果状态出现“缺采告警”“行数告警”“采集失败告警”，或数据日期不是最新交易日，停止使用结果并提交
+`USER_FEEDBACK`，不要在 USER 会话中补采数据。开发者本人需要维护数据时，应退出并进入 RD：
 
 ```powershell
 .\scripts\agent.ps1 rd
@@ -40,6 +41,9 @@ uv run python -m cli zt scan
 ```powershell
 uv run python -m cli zt daily
 ```
+
+计划任务安装属于维护动作，不属于 USER Agent 权限。维护者可在 RD/运维流程中先只读查看
+`.\scripts\setup_limit_up_task.ps1 -Action show`，得到明确授权后再用 `-Action install` 启用。
 
 ## 我想主动跑一次因子挖掘
 

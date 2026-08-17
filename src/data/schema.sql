@@ -41,6 +41,22 @@ CREATE TABLE IF NOT EXISTS zt_pool (
 
 CREATE INDEX IF NOT EXISTS idx_zt_pool_date ON zt_pool(trade_date);
 
+-- 涨停历史采集审计。每次盘后采集都追加一条记录，供状态页区分
+-- “从未执行”“已执行但接口为空”和“行数异常”，避免只看 MAX(date) 掩盖断档。
+CREATE TABLE IF NOT EXISTS limit_up_collection_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date    TEXT NOT NULL,
+    attempted_at  TEXT NOT NULL,
+    price_rows    INTEGER NOT NULL DEFAULT 0,
+    zt_rows       INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL,
+    detail        TEXT DEFAULT '',
+    snapshot_time TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_limit_up_collection_date
+    ON limit_up_collection_runs(trade_date, attempted_at);
+
 CREATE TABLE IF NOT EXISTS zb_pool (
     stock_code    TEXT NOT NULL,
     trade_date    TEXT NOT NULL,

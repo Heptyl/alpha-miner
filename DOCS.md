@@ -109,7 +109,7 @@ alpha-miner/
 │   ├── publish_data.py     #   SQLite backup 一致性上传
 │   ├── activate_data.py    #   校验、保留上一版、原子激活
 │   └── check_limit_up_repro.py # 本机/服务器跨 NumPy/Pandas 结果指纹
-├── tests/                  # 405 passed + 2 skipped
+├── tests/                  # 离线回归 407 passed + 2 skipped（另 7 个 live 测试）
 └── pyproject.toml          # uv 项目配置 (Python >= 3.11)
 ```
 
@@ -310,6 +310,7 @@ uv run python -m cli zt enrich --min-market-rows 100
 uv run python -m cli zt evolve --generations 5 --population 24
 
 # 使用者：盘后一次完成更新、计算与操作卡
+uv run python -m cli zt collect
 uv run python -m cli zt daily
 uv run python -m cli zt status
 uv run python -m cli zt scan
@@ -317,6 +318,26 @@ uv run python -m cli zt scan
 
 东方财富涨停池接口通常只能稳定返回当前交易日，不能把参数日期当作可靠历史源。
 因此持续的每日采集比事后回填更重要；数据不足时系统保持 0 仓位是设计行为，不是 CLI 故障。
+
+`zt collect` 是供计划任务调用的严格采集入口。每次执行都会把目标日、尝试时间、全市场行情行数、
+涨停池去重行数、结果和详情追加到 `limit_up_collection_runs`；涨停池为空、超过 200 行，或工作日
+行情与涨停池同时为空时返回非零。重复执行按股票去重审计，同日后续成功会关闭该日失败状态，
+不会因为重复快照放大行数。
+
+`zt status` 以至少 1,000 只股票的 `daily_price` 日期作为事实交易日，检查对应涨停池是否缺采；
+同时报告涨停历史总天数、当前连续天数、异常日、自然日长断档和最后一次采集审计。
+`zt status --strict` 在采集追踪起点之后仍有未关闭失败时返回非零，供调度器告警。Windows 维护者可用：
+
+```powershell
+# 只查看，不改变系统
+.\scripts\setup_limit_up_task.ps1 -Action show
+
+# 明确安装后：工作日 16:10 采集，18:10 重试；日志写入 logs/
+.\scripts\setup_limit_up_task.ps1 -Action install
+```
+
+脚本只创建本地计划任务，不发布数据、不运行进化。节假日若所有行情源都为空，审计会保守记录为
+`unconfirmed`；维护者应核对交易日后处理，不能把“可能休市”静默当作采集成功。
 
 进化前会做历史基因质量检查。没有横截面变化、不能改变当日排序或关键原始字段覆盖不足的基因
 自动置零，不再允许演化器给“无数据字段”分配漂亮但无意义的权重。CLI 同时展示原始字段覆盖率、
@@ -703,7 +724,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | market_scripts | 市场剧本 |
 | replay_log | 复盘记录 |
 
-## 测试（405 passed + 2 skipped）
+## 测试（离线 407 passed + 2 skipped，7 live deselected）
 
 ### 硬断言测试 (47 个)
 
@@ -726,6 +747,7 @@ python -m cli report --brief --strategy-scan                   # 含策略扫描
 | test_continuous_evolution | 失败者进下一代、checkpoint 续跑、空种群复苏、可执行变异 |
 | test_data_fetch_optimization | 行情字段/日期、金额单位、采集并发、历史隔离、代理开关 |
 | test_limit_up_evolution | 涨停结构特征、T1 开盘/T+1 标签、样本惩罚、操作闸门 |
+| test_limit_up_history | 逐次采集审计、缺采/异常/断档、失败重试闭环、严格状态退出 (8 tests) |
 
 ### 其他测试文件
 

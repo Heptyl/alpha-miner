@@ -10,6 +10,13 @@ from rich.console import Console
 from rich.table import Table
 
 from src.data.collector import collect_date
+from src.data.limit_up_history import (
+    CollectionCheck,
+    assess_limit_up_history,
+    count_rows_for_date,
+    evaluate_collection_day,
+    record_collection_attempt,
+)
 from src.data.sources import akshare_zt_pool
 from src.data.storage import Storage
 from src.mining.limit_up_evolution import (
@@ -21,10 +28,58 @@ from src.mining.limit_up_evolution import (
 
 console = Console()
 
+ADMISSION_SIGNAL_DAYS = 40
+FORMAL_EVALUATION_SIGNAL_DAYS = 120
+
 
 @click.group()
 def main():
     """涨停板专用研究与操作卡。"""
+
+
+def _collect_and_audit(trade_date: str, db: Storage) -> tuple[dict[str, int], CollectionCheck]:
+    """采集目标日数据，并把可供调度器检查的结果持久化。"""
+    try:
+        counts = collect_date(trade_date, db)
+        check = evaluate_collection_day(db, trade_date)
+    except Exception as exc:
+        counts = {}
+        check = CollectionCheck(
+            trade_date=trade_date,
+            price_rows=count_rows_for_date(db, "daily_price", trade_date),
+            zt_rows=count_rows_for_date(db, "zt_pool", trade_date),
+            status="collection_error",
+            detail=f"采集器异常退出（{type(exc).__name__}）",
+        )
+    record_collection_attempt(db, check)
+    style = {
+        "ok": "green",
+        "skipped": "cyan",
+        "missing": "red",
+        "market_incomplete": "red",
+        "row_anomaly": "red",
+        "unconfirmed": "yellow",
+        "collection_error": "red",
+    }.get(check.status, "white")
+    console.print(
+        f"采集审计：[{style}]{check.status}[/{style}] | "
+        f"行情 {check.price_rows} 行 | 涨停 {check.zt_rows} 行 | {check.detail}"
+    )
+    return counts, check
+
+
+@main.command("collect")
+@click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
+def collect_cmd(db_path: str):
+    """定时任务入口：采集并严格校验当日涨停历史。"""
+    db = Storage(db_path)
+    db.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    console.print(f"[bold cyan]更新 {today} 涨停历史[/bold cyan]")
+    counts, check = _collect_and_audit(today, db)
+    console.print(f"采集返回：{sum(counts.values())} 条")
+    if check.failed:
+        raise click.ClickException(f"涨停历史采集告警：{check.detail}")
 
 
 @main.command("daily")
@@ -38,8 +93,19 @@ def daily_cmd(skip_collect: bool, db_path: str, state_path: str):
     today = datetime.now().strftime("%Y-%m-%d")
     if not skip_collect:
         console.print(f"[bold cyan]1/3 更新 {today} 数据[/bold cyan]")
-        counts = collect_date(today, db)
+        counts, check = _collect_and_audit(today, db)
         console.print(f"采集完成：{sum(counts.values())} 条")
+        if check.failed:
+            raise click.ClickException(f"停止使用不完整数据：{check.detail}")
+        if check.status == "skipped":
+            return
+    else:
+        check = evaluate_collection_day(db, today)
+        if check.failed:
+            raise click.ClickException(f"已有数据未通过涨停历史检查：{check.detail}")
+        if check.status == "skipped":
+            console.print("[cyan]今天是周末，不生成新的涨停操作卡。[/cyan]")
+            return
 
     compute_step = "1/2" if skip_collect else "2/3"
     card_step = "2/2" if skip_collect else "3/3"
@@ -67,36 +133,78 @@ def daily_cmd(skip_collect: bool, db_path: str, state_path: str):
 @main.command("status")
 @click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
 @click.option("--state", "state_path", default="data/limit_up_evolution.json", show_default=True)
-def status_cmd(db_path: str, state_path: str):
+@click.option("--strict", is_flag=True, help="活动采集期有未闭环告警时返回非零")
+def status_cmd(db_path: str, state_path: str, strict: bool):
     """用一张表说明数据、验证和实盘闸门是否就绪。"""
     db = Storage(db_path)
     db.init_db()
-    rows = db.execute(
-        "SELECT (SELECT MAX(trade_date) FROM daily_price) AS price_date, "
-        "(SELECT MAX(trade_date) FROM zt_pool) AS zt_date"
-    )
-    latest = rows[0] if rows else {}
+    health = assess_limit_up_history(db)
     state_file = Path(state_path)
     state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
     summary = state.get("dataset_summary", {})
     best = state.get("best") or {}
     accepted = bool(best.get("accepted"))
+    signal_dates = max(0, int(summary.get("signal_dates", 0) or 0))
+    admission_days_remaining = max(0, ADMISSION_SIGNAL_DAYS - signal_dates)
+    evaluation_days_remaining = max(0, FORMAL_EVALUATION_SIGNAL_DAYS - signal_dates)
     table = Table(title="涨停因子可用状态")
     table.add_column("检查项")
     table.add_column("当前值")
-    table.add_row("价格数据", str(latest.get("price_date") or "缺失"))
-    table.add_row("涨停池", str(latest.get("zt_date") or "缺失"))
-    table.add_row(
-        "有效信号日",
-        f"{summary.get('signal_dates', 0)} / {summary.get('minimum_signal_dates', 40)}",
-    )
+    table.add_row("价格数据", str(health.latest_price_date or "缺失"))
+    table.add_row("涨停池", str(health.latest_zt_date or "缺失"))
+    table.add_row("涨停历史", f"{health.history_days} 日")
+    table.add_row("当前连续采集", f"{health.continuous_days} 日")
+    table.add_row("采集追踪起点", health.tracking_start or "尚未登记")
+    table.add_row("缺采交易日", f"{len(health.missing_dates)} 日")
+    table.add_row("行数异常日", f"{len(health.abnormal_dates)} 日")
+    table.add_row("未闭环采集失败", f"{len(health.failed_attempt_dates)} 日")
+    if health.last_attempt:
+        attempt = health.last_attempt
+        table.add_row(
+            "最后采集审计",
+            f"{attempt['trade_date']} {attempt['status']} @ {attempt['attempted_at']}",
+        )
+    else:
+        table.add_row("最后采集审计", "尚无记录")
+    table.add_row("当前信号日", f"{signal_dates} 日")
+    table.add_row("距离40日因子准入", f"还差 {admission_days_remaining} 日")
+    table.add_row("距离120日正式评估", f"还差 {evaluation_days_remaining} 日")
     table.add_row("候选因子", best.get("genome", {}).get("name", "尚未演化"))
     table.add_row(
         "实盘闸门", "[green]已通过[/green]" if accepted else "[yellow]未通过，只观察[/yellow]"
     )
     console.print(table)
+    if health.missing_dates:
+        dates = "、".join(health.missing_dates[-8:])
+        prefix = "…、" if len(health.missing_dates) > 8 else ""
+        console.print(f"[red]缺采告警：[/red]{prefix}{dates}")
+    if health.abnormal_dates:
+        abnormal = "、".join(
+            f"{date}({count}行)" for date, count in health.abnormal_dates[-8:]
+        )
+        prefix = "…、" if len(health.abnormal_dates) > 8 else ""
+        console.print(f"[red]行数告警：[/red]{prefix}{abnormal}")
+    if health.failed_attempt_dates:
+        failed = "、".join(
+            f"{date}({status})" for date, status in health.failed_attempt_dates[-8:]
+        )
+        prefix = "…、" if len(health.failed_attempt_dates) > 8 else ""
+        console.print(f"[red]采集失败告警：[/red]{prefix}{failed}")
+    if health.calendar_gaps:
+        gaps = "；".join(
+            f"{gap.previous_date}→{gap.next_date}（{gap.calendar_days}自然日）"
+            for gap in health.calendar_gaps[-5:]
+        )
+        prefix = "…；" if len(health.calendar_gaps) > 5 else ""
+        console.print(f"[yellow]连续性告警：[/yellow]{prefix}{gaps}")
+    if health.last_attempt and health.last_attempt["status"] not in {"ok", "skipped"}:
+        console.print(
+            "[yellow]最后采集详情：[/yellow]" + str(health.last_attempt["detail"])
+        )
     if best.get("rejection_reasons"):
         console.print("未准入原因：" + "；".join(best["rejection_reasons"]))
+    if strict and health.strict_failure:
+        raise click.ClickException("涨停历史仍有未闭环采集告警")
 
 
 @main.command("enrich")

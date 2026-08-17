@@ -58,6 +58,13 @@ class TestCLISmoke:
         code, out, err = run_cli("strategy", "--help")
         assert code == 0, f"strategy --help 失败:\n{err}"
 
+    def test_limit_up_help_lists_collection_loop(self):
+        """zt --help 应暴露严格采集与状态入口。"""
+        code, out, err = run_cli("zt", "--help")
+        assert code == 0, f"zt --help 失败:\n{err}"
+        assert "collect" in out
+        assert "status" in out
+
     def test_strategy_list(self):
         """strategy list 必须输出策略列表。"""
         code, out, err = run_cli("strategy", "list")
