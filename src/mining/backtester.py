@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 
+from src.data.pit import PITMode, PointInTimeView
 from src.data.storage import Storage
 
 warnings.filterwarnings("ignore", message="An input array is constant")
@@ -29,6 +30,11 @@ class BacktestResult:
     total_days: int = 0
     ic_series: list = field(default_factory=list)  # [{date, ic, regime, zt_count}]
     error: Optional[str] = None
+    research_stage: str = "DEVELOPMENT_ONLY"
+    pit_mode: str = PITMode.RETRO_DEVELOPMENT.value
+    holdout_opened: bool = False
+    development_dates: list[str] = field(default_factory=list)
+    reserved_holdout_dates: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +46,11 @@ class BacktestResult:
             "total_days": self.total_days,
             "ic_series": self.ic_series,
             "error": self.error,
+            "research_stage": self.research_stage,
+            "pit_mode": self.pit_mode,
+            "holdout_opened": self.holdout_opened,
+            "development_dates": self.development_dates,
+            "reserved_holdout_dates": self.reserved_holdout_dates,
         }
 
 
@@ -61,6 +72,7 @@ class FactorBacktester:
         factor_name: str = "unknown",
         lookback_days: int = 60,
         forward_days: int = 1,
+        end_at: datetime | None = None,
     ) -> BacktestResult:
         """在最近 lookback_days 个交易日上逐日回测。
 
@@ -77,7 +89,10 @@ class FactorBacktester:
         result = BacktestResult(factor_name=factor_name)
 
         try:
-            trade_dates = self._get_trade_dates(lookback_days + forward_days * 3)
+            trade_dates = self._get_trade_dates(
+                lookback_days + forward_days * 3,
+                end_at=end_at,
+            )
         except Exception as e:
             result.error = f"获取交易日历失败: {e}"
             return result
@@ -86,15 +101,22 @@ class FactorBacktester:
             result.error = f"交易日数据不足: {len(trade_dates)} 天"
             return result
 
-        # 只在有足够前瞻数据的日期上回测
-        test_dates = trade_dates[:len(trade_dates) - forward_days]
-        if len(test_dates) > lookback_days:
-            test_dates = test_dates[-lookback_days:]
+        # 最后20%只冻结日期边界。本阶段绝不读取其行情值、特征或收益标签。
+        analysis_dates = trade_dates[-lookback_days:]
+        holdout_start = max(1, int(len(analysis_dates) * 0.80))
+        development_calendar = analysis_dates[:holdout_start]
+        holdout_dates = analysis_dates[holdout_start:]
+        if len(development_calendar) <= forward_days:
+            result.error = "development交易日不足"
+            return result
+        development_dates = development_calendar[:-forward_days]
+        result.development_dates = development_dates
+        result.reserved_holdout_dates = holdout_dates
 
         ic_records = []
         sample_sizes = []
 
-        for i, date_str in enumerate(test_dates):
+        for date_str in development_dates:
             as_of = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=15)
 
             # 构建 universe（按成交额取 top 500 活跃股）
@@ -104,7 +126,12 @@ class FactorBacktester:
 
             # 计算因子值
             try:
-                factor_values = compute_fn(universe, as_of, self.db)
+                pit = PointInTimeView(
+                    self.db,
+                    as_of,
+                    mode=PITMode.RETRO_DEVELOPMENT,
+                )
+                factor_values = compute_fn(universe, as_of, pit)
             except Exception:
                 continue
 
@@ -132,6 +159,8 @@ class FactorBacktester:
             mask = fv.notna() & fr.notna()
             fv, fr = fv[mask], fr[mask]
             if len(fv) < 10:
+                continue
+            if fv.nunique(dropna=True) < 2 or fr.nunique(dropna=True) < 2:
                 continue
 
             ic, _ = scipy_stats.spearmanr(fv, fr)
@@ -169,17 +198,25 @@ class FactorBacktester:
         result.ic_series = ic_records
         return result
 
-    def _get_trade_dates(self, days: int) -> list[str]:
+    def _get_trade_dates(self, days: int, end_at: datetime | None = None) -> list[str]:
         """从 daily_price 获取最近的交易日列表。
 
         使用 bypass_snapshot=True：回测场景下 backfill 数据的
         snapshot_time 是导入时间，不是交易当天。
         """
-        end = datetime.now()
-        df = self.db.query("daily_price", end, bypass_snapshot=True)
-        if df.empty:
-            return []
-        dates = sorted(df["trade_date"].unique())
+        if end_at is None:
+            rows = self.db.execute(
+                "SELECT DISTINCT trade_date FROM daily_price ORDER BY trade_date"
+            )
+        else:
+            rows = self.db.execute(
+                """
+                SELECT DISTINCT trade_date FROM daily_price
+                WHERE trade_date <= ? ORDER BY trade_date
+                """,
+                (end_at.strftime("%Y-%m-%d"),),
+            )
+        dates = [str(row["trade_date"]) for row in rows if row.get("trade_date")]
         return dates[-days:] if len(dates) > days else dates
 
     def _get_universe(self, as_of: datetime, date_str: str) -> list[str]:

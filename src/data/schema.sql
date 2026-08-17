@@ -57,6 +57,72 @@ CREATE TABLE IF NOT EXISTS limit_up_collection_runs (
 CREATE INDEX IF NOT EXISTS idx_limit_up_collection_date
     ON limit_up_collection_runs(trade_date, attempted_at);
 
+-- 涨停前前向证据：同日同候选同阶段只保留首次成功快照，重复任务幂等。
+CREATE TABLE IF NOT EXISTS prelimit_snapshots (
+    trade_date          TEXT NOT NULL,
+    candidate_trade_date TEXT NOT NULL,
+    observed_at         TEXT NOT NULL,
+    stock_code          TEXT NOT NULL,
+    stock_name          TEXT DEFAULT '',
+    phase               TEXT NOT NULL CHECK (phase IN ('AUCTION_0925', 'OPEN_0931')),
+    price               REAL,
+    open                REAL,
+    high                REAL,
+    low                 REAL,
+    volume              REAL,
+    amount              REAL,
+    bid1                REAL,
+    ask1                REAL,
+    source              TEXT NOT NULL,
+    snapshot_time       TEXT NOT NULL,
+    PRIMARY KEY (trade_date, phase, stock_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prelimit_snapshots_pair
+    ON prelimit_snapshots(trade_date, stock_code, phase);
+
+-- 最新成功涨停候选的5分钟RAW历史补采清单，同时承载逐股恢复checkpoint。
+CREATE TABLE IF NOT EXISTS minute_capture_items (
+    candidate_trade_date TEXT NOT NULL,
+    stock_code          TEXT NOT NULL,
+    stock_name          TEXT DEFAULT '',
+    features_json       TEXT NOT NULL,
+    universe_hash       TEXT NOT NULL,
+    frozen_at           TEXT NOT NULL,
+    status              TEXT NOT NULL CHECK (status IN ('PENDING', 'SUCCESS', 'ERROR', 'CONFLICT')),
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    last_error          TEXT,
+    bars_count          INTEGER NOT NULL DEFAULT 0,
+    complete_days       INTEGER NOT NULL DEFAULT 0,
+    partial_days        INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at     TEXT,
+    PRIMARY KEY (candidate_trade_date, stock_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_minute_capture_items_resume
+    ON minute_capture_items(candidate_trade_date, status, stock_code);
+
+-- RETRO_BACKFILL：历史bar只能从first_fetched_at起视为可用，不能冒充当时实时可见。
+CREATE TABLE IF NOT EXISTS minute_bars_5m (
+    source              TEXT NOT NULL,
+    stock_code          TEXT NOT NULL,
+    period              TEXT NOT NULL CHECK (period = '5m'),
+    adjust              TEXT NOT NULL CHECK (adjust = 'RAW'),
+    bar_time            TEXT NOT NULL,
+    open                REAL NOT NULL,
+    high                REAL NOT NULL,
+    low                 REAL NOT NULL,
+    close               REAL NOT NULL,
+    volume              REAL NOT NULL,
+    amount              REAL NOT NULL,
+    first_fetched_at    TEXT NOT NULL,
+    payload_hash        TEXT NOT NULL,
+    PRIMARY KEY (source, stock_code, period, adjust, bar_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_minute_bars_5m_code_time
+    ON minute_bars_5m(stock_code, bar_time);
+
 CREATE TABLE IF NOT EXISTS zb_pool (
     stock_code    TEXT NOT NULL,
     trade_date    TEXT NOT NULL,

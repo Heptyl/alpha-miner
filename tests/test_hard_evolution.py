@@ -5,10 +5,8 @@
 - 零因子（IC=0.0）→ accepted=False
 - 验收阈值精确匹配
 """
-import json
 from datetime import datetime
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -63,20 +61,16 @@ def _seed_perfect_data(db, trade_dates):
 
 
 class TestEvaluateAcceptance:
-    """_evaluate 的验收判定逻辑。"""
+    """_evaluate 的 development-only 判定逻辑。"""
 
-    def test_perfect_factor_accepted(self, engine, db):
-        """完美因子 → accepted=True。"""
+    def test_perfect_factor_only_passes_development(self, engine, db):
+        """完美因子也只能通过 development，不能成为 accepted。"""
         # 注入足够数据
         dates = [f"2024-06-{d:02d}" for d in range(1, 30)]
         _seed_perfect_data(db, dates)
 
         # 构造一个直接读取 factor_values 的因子代码
         code = '''"""完美正相关因子"""
-import pandas as pd
-import numpy as np
-from datetime import datetime
-
 def compute(universe, as_of, db):
     date_str = as_of.strftime("%Y-%m-%d")
     fv = db.query("factor_values", as_of,
@@ -102,15 +96,15 @@ def compute(universe, as_of, db):
         with patch.dict(os.environ, {"SANDBOX_AS_OF": "2024-06-25"}):
             engine._evaluate(candidate)
 
-        # 沙箱应该执行成功
-        if candidate.error:
-            pytest.skip(f"沙箱执行出错（可能环境问题）: {candidate.error}")
-
+        assert candidate.error is None
         assert candidate.evaluation is not None, "evaluation 为空"
         ic_mean = candidate.evaluation.get("ic_mean", 0.0)
         # 完美正相关数据，IC 应接近 1.0
         assert ic_mean > 0.5, f"IC_mean={ic_mean}, 期望 >0.5"
-        assert candidate.accepted, f"因子未被验收，evaluation={candidate.evaluation}"
+        assert candidate.development_passed
+        assert candidate.accepted is False
+        assert candidate.evaluation["research_stage"] == "DEVELOPMENT_ONLY"
+        assert candidate.evaluation["holdout_opened"] is False
 
     def test_zero_factor_rejected(self, engine, db):
         """全零因子 → accepted=False。"""
@@ -118,8 +112,6 @@ def compute(universe, as_of, db):
         _seed_perfect_data(db, dates)
 
         code = '''"""全零因子"""
-import pandas as pd
-
 def compute(universe, as_of, db):
     return pd.Series(0.0, index=universe, dtype=float)
 '''
@@ -134,9 +126,6 @@ def compute(universe, as_of, db):
         with patch.dict(os.environ, {"SANDBOX_AS_OF": "2024-06-25"}):
             engine._evaluate(candidate)
 
-        if candidate.error:
-            pytest.skip(f"沙箱执行出错: {candidate.error}")
-
         assert candidate.evaluation is not None
         ic_mean = candidate.evaluation.get("ic_mean", 0.0)
         # 全零因子的 IC 应该接近 0（或 NaN → 0）
@@ -144,6 +133,7 @@ def compute(universe, as_of, db):
             f"全零因子 IC={ic_mean}, 应该小于阈值 {engine.MIN_IC}"
         assert not candidate.accepted, \
             f"全零因子不应被验收，evaluation={candidate.evaluation}"
+        assert candidate.development_passed is False
 
 
 class TestEvaluateThresholds:
@@ -219,7 +209,8 @@ class TestCandidateSerialization:
         assert d["config"]["key"] == "val"
         assert d["code"] == "code_here"
         assert d["evaluation"]["ic_mean"] == 0.1
-        assert d["accepted"] is True
+        assert d["accepted"] is False
+        assert d["development_passed"] is False
         assert d["generation"] == 3
 
     def test_from_dict_roundtrip(self):
@@ -234,7 +225,8 @@ class TestCandidateSerialization:
         assert restored.source == original.source
         assert restored.config == original.config
         assert restored.evaluation == original.evaluation
-        assert restored.accepted == original.accepted
+        assert restored.accepted is False
+        assert restored.development_passed is False
         assert restored.error == original.error
         assert restored.generation == original.generation
 

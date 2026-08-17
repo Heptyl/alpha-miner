@@ -136,6 +136,104 @@ def test_cli_prints_complete_non_admitted_paper_without_modifying_database(tmp_p
     assert _fingerprint(path) == before
 
 
+def test_cli_explains_h1_candidate_and_development_boundary_read_only(tmp_path):
+    storage = _storage(tmp_path, "h1-cli.db")
+    card = PlayCard(
+        play_id="theme_new_entrant_diffusion_v1",
+        play_name="热点扩散新强势成员（H1）",
+        behavior_logic="行业涨停宽度加速后，注意力可能扩散到新强势成员。",
+        signal_trade_date="2026-08-17",
+        candidates=[
+            {
+                "stock_code": "600001",
+                "stock_name": "通用候选",
+                "industry": "机器人",
+                "paper_status": "PLANNED",
+                "signal_close": 10.0,
+                "allowed_open_low": 9.8,
+                "allowed_open_high": 10.5,
+                "previous_zt_breadth": 2,
+                "current_zt_breadth": 4,
+                "signal_amount": 123456789.0,
+                "selection_reason": "机器人涨停宽度2→4加速；本日新进入强势池；行业成交额排名1",
+                "abandon_conditions": "开盘越界、涨停开盘或无报价",
+            }
+        ],
+        trigger_rule="D+1开盘在[-2%, +5%]且非涨停开盘时模拟买入。",
+        abandon_rule="开盘越界、涨停开盘或无报价即未成交；不回填排名2。",
+        exit_rule="固定D+3开盘模拟卖出，扣20bp。",
+        historical_evidence={
+            "research_status": "DEVELOPMENT_CANDIDATE",
+            "usage_status": "PAPER_ONLY",
+            "independent_signal_days": 12,
+            "development_mean_net_return_pct": 0.5530,
+            "development_ci95_pct": [-0.9914, 2.0835],
+            "holm_significant": False,
+            "late_period_mean_net_return_pct": 0.1299,
+            "current_candidate_count": 1,
+            "previous_day_audit_source": "LEGACY_POST_CLOSE_SNAPSHOT",
+            "total_cost_bps": 20,
+            "data_limitations": "样本小、区间跨0，不是胜率优势。",
+            "empty_reason": "",
+        },
+        paper_status="PLANNED",
+        admission_status="NOT_ADMITTED",
+        generated_at="2026-08-17T16:20:00+08:00",
+    )
+    save_play_card(storage, card)
+    path = Path(storage.db_path)
+    before = _fingerprint(path)
+
+    result, elapsed = _run_play(path)
+
+    assert result.returncode == 0, result.stderr
+    for text in (
+        "玩法：热点扩散新强势成员（H1）",
+        "研究边界：DEVELOPMENT_CANDIDATE / PAPER_ONLY / NOT_ADMITTED",
+        "600001 通用候选，机器人，D收盘10.0000",
+        "D+1允许开盘9.8000–10.5000",
+        "宽度2→4",
+        "为何入选：机器人涨停宽度2→4加速；本日新进入强势池；行业成交额排名1",
+        "明日模拟动作：若开盘位于预设[-2%, +5%]区间且非涨停开盘，"
+        "则按开盘价模拟买入；否则自动记录未成交",
+        "development独立收益日：12",
+        "development D+3开盘成本后均值：0.5530%",
+        "development 95%置信区间：[-0.9914%, 2.0835%]",
+        "Holm校正显著：否",
+        "development后段均值：0.1299%",
+        "前一交易日证据来源：LEGACY_POST_CLOSE_SNAPSHOT",
+    ):
+        assert text in result.stdout
+    assert "WATCH_ONLY" not in result.stdout
+    assert elapsed < 5
+    assert _fingerprint(path) == before
+
+
+def test_cli_explains_zero_h1_candidates(tmp_path):
+    storage = _storage(tmp_path, "h1-empty.db")
+    card = replace(
+        _card(),
+        play_id="theme_new_entrant_diffusion_v1",
+        play_name="热点扩散新强势成员（H1）",
+        candidates=[],
+        historical_evidence={
+            "research_status": "DEVELOPMENT_CANDIDATE",
+            "usage_status": "PAPER_ONLY",
+            "current_candidate_count": 0,
+            "empty_reason": "本日行业涨停宽度未同时满足至少3且高于前日",
+        },
+    )
+    save_play_card(storage, card)
+
+    result, _ = _run_play(Path(storage.db_path))
+
+    assert result.returncode == 0
+    assert (
+        "本日0只符合条件的PAPER候选：本日行业涨停宽度未同时满足至少3且高于前日"
+        in result.stdout
+    )
+
+
 def test_cli_shows_latest_plan_and_recent_candidate_results_read_only(tmp_path):
     storage = _storage(tmp_path, "lifecycle-output.db")
     result_card = replace(
@@ -300,7 +398,7 @@ def _mock_collection(status: str, *, record_ok: bool = False):
     return collect
 
 
-def test_collect_success_builds_one_idempotent_card(tmp_path, monkeypatch):
+def test_collect_success_builds_both_idempotent_cards(tmp_path, monkeypatch):
     from cli import limit_up
 
     path = tmp_path / "collect-ok.db"
@@ -320,8 +418,51 @@ def test_collect_success_builds_one_idempotent_card(tmp_path, monkeypatch):
             "play_id": "three_to_four_reseal",
             "paper_status": "PLANNED",
             "admission_status": "NOT_ADMITTED",
-        }
+        },
+        {
+            "play_id": "theme_new_entrant_diffusion_v1",
+            "paper_status": "PLANNED",
+            "admission_status": "NOT_ADMITTED",
+        },
     ]
+
+
+def test_collect_intraday_ok_skips_settlement_and_card_generation(tmp_path, monkeypatch):
+    from cli import limit_up
+
+    path = tmp_path / "collect-intraday-ok.db"
+
+    def collect(trade_date: str, db: Storage):
+        db.execute_write(
+            """
+            INSERT INTO zt_pool
+                (stock_code, trade_date, name, consecutive_zt, snapshot_time)
+            VALUES ('INTRADAY', ?, '盘中候选', 3, ?)
+            """,
+            (trade_date, f"{trade_date} 11:00:00"),
+        )
+        db.execute_write(
+            """
+            INSERT INTO limit_up_collection_runs
+                (trade_date, attempted_at, price_rows, zt_rows, status, detail)
+            VALUES (?, ?, 5000, 50, 'ok', '')
+            """,
+            (trade_date, f"{trade_date} 11:00:00"),
+        )
+        return {"zt_pool": 50}, CollectionCheck(
+            trade_date=trade_date,
+            price_rows=5000,
+            zt_rows=50,
+            status="ok",
+            detail="mock intraday ok",
+        )
+
+    monkeypatch.setattr(limit_up, "_collect_and_audit", collect)
+    result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
+
+    assert result.exit_code == 0, result.output
+    assert "尚未满足15:40后的盘后门槛" in result.output
+    assert Storage(str(path)).execute("SELECT COUNT(*) AS n FROM play_cards") == [{"n": 0}]
 
 
 @pytest.mark.parametrize("status", ["skipped", "missing"])
@@ -350,7 +491,7 @@ def test_collect_card_build_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
     assert result.exit_code != 0
-    assert "三进四PAPER玩法卡生成失败" in result.output
+    assert "PAPER玩法卡生成失败" in result.output
     assert "synthetic build failure" in result.output
     assert Storage(str(path)).execute("SELECT COUNT(*) AS n FROM play_cards") == [{"n": 0}]
 
@@ -362,23 +503,40 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
     monkeypatch.setattr(limit_up, "_collect_and_audit", _mock_collection("ok", record_ok=True))
     calls = []
 
-    def settle(storage):
-        calls.append("settle")
+    def settle_three_to_four(storage):
+        calls.append("settle_three_to_four")
+        return []
+
+    def settle_theme(storage):
+        calls.append("settle_theme")
         return []
 
     original_build = limit_up.build_three_to_four_card
 
     def build(storage, **kwargs):
-        calls.append("build")
+        calls.append("build_three_to_four")
         return original_build(storage, **kwargs)
 
-    monkeypatch.setattr(limit_up, "settle_three_to_four_cards", settle)
+    original_theme_build = limit_up.build_theme_new_entrant_diffusion_card
+
+    def build_theme(storage, **kwargs):
+        calls.append("build_theme")
+        return original_theme_build(storage, **kwargs)
+
+    monkeypatch.setattr(limit_up, "settle_three_to_four_cards", settle_three_to_four)
+    monkeypatch.setattr(limit_up, "settle_theme_new_entrant_diffusion_cards", settle_theme)
     monkeypatch.setattr(limit_up, "build_three_to_four_card", build)
+    monkeypatch.setattr(limit_up, "build_theme_new_entrant_diffusion_card", build_theme)
 
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
     assert result.exit_code == 0, result.output
-    assert calls == ["settle", "build"]
+    assert calls == [
+        "settle_three_to_four",
+        "settle_theme",
+        "build_three_to_four",
+        "build_theme",
+    ]
 
 
 def test_collect_settlement_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
@@ -394,6 +552,6 @@ def test_collect_settlement_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
     assert result.exit_code != 0
-    assert "三进四PAPER模拟交易结算失败" in result.output
+    assert "PAPER模拟交易结算失败" in result.output
     assert "synthetic settlement failure" in result.output
     assert Storage(str(path)).execute("SELECT COUNT(*) AS n FROM play_cards") == [{"n": 0}]

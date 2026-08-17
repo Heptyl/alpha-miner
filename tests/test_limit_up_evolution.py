@@ -194,8 +194,11 @@ def test_event_dataset_uses_next_open_and_t_plus_one_exit(tmp_path):
     )
     events, summary = engine.build_event_dataset()
 
-    assert summary["signal_dates"] >= 3
-    assert "reseal_quality" in summary["active_features"]
+    assert summary["signal_dates"] >= 1
+    assert summary["research_status"] == "LEGACY_RESEARCH_ONLY"
+    assert summary["holdout_status"] == "HOLDOUT_NOT_OPENED"
+    assert summary["holdout_opened"] is False
+    assert summary["reserved_holdout_dates"]
     assert "market_heat" in summary["inactive_features"]
     assert summary["source_coverage"]["seal_amount"] == 1.0
     assert summary["excluded_non_trading_dates"] == ["2024-01-06"]

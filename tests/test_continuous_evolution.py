@@ -5,6 +5,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from src.data.pit import PITMode, PointInTimeView
 from src.data.storage import Storage
 from src.mining.evolution import Candidate, EvolutionEngine
 
@@ -170,7 +171,9 @@ def test_conditional_template_compares_against_configured_threshold(tmp_path):
     code = engine._template_construct(candidate)
     compute = engine._extract_compute_fn(code)
 
-    values = compute(["000001", "000002"], datetime(2024, 6, 14, 15), db)
+    decision = datetime(2024, 6, 14, 15)
+    pit = PointInTimeView(db, decision, PITMode.FORWARD)
+    values = compute(["000001", "000002"], decision, pit)
 
     assert values["000001"] == 0.0
     assert values["000002"] == 1.0
@@ -181,8 +184,7 @@ def test_reverse_mutation_changes_executable_output(tmp_path):
         db_path=str(tmp_path / "test.db"),
         mining_log_path=str(tmp_path / "log.jsonl"),
     )
-    parent_code = """import pandas as pd
-def compute(universe, as_of, db):
+    parent_code = """def compute(universe, as_of, db):
     return pd.Series({code: i + 1 for i, code in enumerate(universe)}, dtype=float)
 """
     code = engine._wrap_mutation_code(parent_code, {"mutation_type": "reverse_direction"})

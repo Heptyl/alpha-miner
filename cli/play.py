@@ -62,6 +62,16 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
         "exit_proxy",
         "total_cost_bps",
         "net_return_pct",
+        "industry",
+        "signal_close",
+        "allowed_open_low",
+        "allowed_open_high",
+        "previous_zt_breadth",
+        "current_zt_breadth",
+        "signal_amount",
+        "selection_reason",
+        "abandon_conditions",
+        "entry_gap_pct",
     }
     suffix = f"，{board_count}板" if board_count is not None else ""
     extras = {key: value for key, value in candidate.items() if key not in known}
@@ -70,6 +80,18 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
         if extras
         else ""
     )
+    if "allowed_open_low" in candidate and "allowed_open_high" in candidate:
+        details = (
+            f"，{candidate.get('industry') or '未知行业'}，D收盘"
+            f"{_format_candidate_number(candidate.get('signal_close'))}，"
+            f"D+1允许开盘{_format_candidate_number(candidate.get('allowed_open_low'))}–"
+            f"{_format_candidate_number(candidate.get('allowed_open_high'))}，"
+            f"宽度{candidate.get('previous_zt_breadth')}→"
+            f"{candidate.get('current_zt_breadth')}，"
+            f"D成交额{_format_candidate_number(candidate.get('signal_amount'))}；"
+            f"为何入选：{candidate.get('selection_reason') or '预注册条件成立'}"
+        )
+        return f"{code} {name}{details}{extra_text}".strip()
     return f"{code} {name}{suffix}{extra_text}".strip()
 
 
@@ -81,10 +103,14 @@ def _candidate_action(candidate: dict[str, Any]) -> str:
     if status == "UNFILLED":
         return f"未成交：{reason or 'D日代理不可成交'}"
     if status == "TRIGGERED":
+        exit_plan = (
+            "计划D+3开盘（入场后的第二个后续开盘）模拟卖出"
+            if candidate.get("allowed_open_low") is not None
+            else "计划D+1开盘模拟卖出"
+        )
         return (
             f"已模拟买入：{candidate.get('entry_trade_date') or 'D日'} @ "
-            f"{_format_candidate_number(candidate.get('entry_price'))}；"
-            "计划D+1开盘模拟卖出"
+            f"{_format_candidate_number(candidate.get('entry_price'))}；{exit_plan}"
         )
     if status == "COMPLETED":
         return (
@@ -93,6 +119,11 @@ def _candidate_action(candidate: dict[str, Any]) -> str:
             f"模拟卖出：{candidate.get('exit_trade_date') or 'D+1'} @ "
             f"{_format_candidate_number(candidate.get('exit_price'))}；"
             f"成本后收益：{_format_signed_percent(candidate.get('net_return_pct'))}"
+        )
+    if candidate.get("allowed_open_low") is not None:
+        return (
+            "明日模拟动作：若开盘位于预设[-2%, +5%]区间且非涨停开盘，"
+            "则按开盘价模拟买入；否则自动记录未成交"
         )
     return (
         "明日模拟动作：若四板开板回封且代理可成交，则按涨停价模拟买入；"
@@ -130,6 +161,16 @@ def _evidence_text(evidence: dict[str, Any]) -> str:
         "entry_proxy": "入场代理",
         "exit_proxy": "退出代理",
         "data_limitations": "数据限制",
+        "research_status": "研究状态",
+        "usage_status": "用途状态",
+        "independent_signal_days": "development独立收益日",
+        "development_mean_net_return_pct": "development D+3开盘成本后均值",
+        "development_ci95_pct": "development 95%置信区间",
+        "holm_significant": "Holm校正显著",
+        "late_period_mean_net_return_pct": "development后段均值",
+        "current_candidate_count": "本日候选",
+        "previous_day_audit_source": "前一交易日证据来源",
+        "empty_reason": "本日0候选原因",
     }
     ordered = [key for key in labels if key in evidence]
     ordered.extend(sorted(key for key in evidence if key not in labels))
@@ -147,6 +188,8 @@ def _format_evidence_value(key: str, value: Any) -> str:
         "completed_count",
         "unfinished_count",
         "untradable_count",
+        "independent_signal_days",
+        "current_candidate_count",
     }
     if key == "metrics_available" and isinstance(value, bool):
         return "是" if value else "否"
@@ -155,8 +198,16 @@ def _format_evidence_value(key: str, value: Any) -> str:
         return str(int(number)) if number.is_integer() else f"{number:g}"
     if key in {"trigger_rate", "win_rate"} and _is_finite_number(value):
         return f"{float(value) * 100:.2f}%"
-    if key in {"avg_net_return_pct", "max_drawdown_pct"} and _is_finite_number(value):
+    if key in {
+        "avg_net_return_pct",
+        "max_drawdown_pct",
+        "development_mean_net_return_pct",
+        "late_period_mean_net_return_pct",
+    } and _is_finite_number(value):
         return f"{float(value):.4f}%"
+    if key == "development_ci95_pct" and isinstance(value, list) and len(value) == 2:
+        if all(_is_finite_number(item) for item in value):
+            return f"[{float(value[0]):.4f}%, {float(value[1]):.4f}%]"
     if key == "profit_loss_ratio" and _is_finite_number(value):
         return f"{float(value):.4f}"
     if key == "total_cost_bps" and _is_finite_number(value):
@@ -190,13 +241,25 @@ def _print_card(card: Any, index: int) -> None:
     print(f"行为逻辑：{card.behavior_logic}")
     print(f"数据日：{card.signal_trade_date}")
     print(f"PAPER/准入：{_admission_label(card)}")
+    research_status = card.historical_evidence.get("research_status")
+    usage_status = card.historical_evidence.get("usage_status")
+    if research_status or usage_status:
+        print(
+            "研究边界："
+            f"{research_status or '未标注'} / {usage_status or '未标注'} / "
+            f"{card.admission_status}"
+        )
     print("候选：")
     if card.candidates:
         for candidate in card.candidates:
             print(f"  - {_candidate_text(candidate)}")
             print(f"    {_candidate_action(candidate)}")
     else:
-        print("  - 今日暂无符合条件的PAPER候选")
+        reason = card.historical_evidence.get("empty_reason")
+        if reason:
+            print(f"  - 本日0只符合条件的PAPER候选：{reason}")
+        else:
+            print("  - 今日暂无符合条件的PAPER候选")
     print(f"触发：{card.trigger_rule}")
     print(f"放弃：{card.abandon_rule}")
     print(f"卖出：{card.exit_rule}")

@@ -17,6 +17,17 @@ from src.data.limit_up_history import (
     evaluate_collection_day,
     record_collection_attempt,
 )
+from src.data.minute_backfill import (
+    MAX_STOCKS_PER_RUN,
+    backfill_latest_minutes,
+    load_minute_status,
+)
+from src.data.prelimit_capture import (
+    AUCTION_PHASE,
+    OPEN_PHASE,
+    capture_prelimit,
+    load_prelimit_status,
+)
 from src.data.sources import akshare_zt_pool
 from src.data.storage import Storage
 from src.mining.limit_up_evolution import (
@@ -26,7 +37,13 @@ from src.mining.limit_up_evolution import (
     describe_rule,
 )
 from src.mining.playbook import save_play_card
-from src.mining.plays import build_three_to_four_card, settle_three_to_four_cards
+from src.mining.plays import (
+    build_theme_new_entrant_diffusion_card,
+    build_three_to_four_card,
+    load_usable_audit_dates,
+    settle_theme_new_entrant_diffusion_cards,
+    settle_three_to_four_cards,
+)
 
 console = Console()
 
@@ -83,20 +100,124 @@ def collect_cmd(db_path: str):
     if check.failed:
         raise click.ClickException(f"涨停历史采集告警：{check.detail}")
     if check.status == "ok":
+        if today not in load_usable_audit_dates(db):
+            console.print(
+                "[yellow]本次审计尚未满足15:40后的盘后门槛，"
+                "跳过PAPER结算与玩法卡生成[/yellow]"
+            )
+            return
         try:
             settled_cards = settle_three_to_four_cards(db)
+            settled_cards.extend(settle_theme_new_entrant_diffusion_cards(db))
             for settled_card in settled_cards:
                 save_play_card(db, settled_card)
         except Exception as exc:
-            raise click.ClickException(f"三进四PAPER模拟交易结算失败：{exc}") from exc
+            raise click.ClickException(f"PAPER模拟交易结算失败：{exc}") from exc
         if settled_cards:
             console.print(f"PAPER模拟交易已结算：{len(settled_cards)} 张历史玩法卡")
         try:
-            card = build_three_to_four_card(db, signal_date=today)
-            save_play_card(db, card)
+            cards = [
+                build_three_to_four_card(db, signal_date=today),
+                build_theme_new_entrant_diffusion_card(db, signal_date=today),
+            ]
+            for card in cards:
+                save_play_card(db, card)
         except Exception as exc:
-            raise click.ClickException(f"三进四PAPER玩法卡生成失败：{exc}") from exc
-        console.print(f"PAPER玩法卡已更新：{card.play_name}（{card.signal_trade_date}）")
+            raise click.ClickException(f"PAPER玩法卡生成失败：{exc}") from exc
+        console.print(f"PAPER玩法卡已更新：{len(cards)}张（{today}）")
+
+
+@main.command("capture-prelimit")
+@click.option(
+    "--phase",
+    type=click.Choice(["auction", "open"]),
+    required=True,
+    help="auction=09:25竞价；open=09:31可成交快照",
+)
+@click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
+def capture_prelimit_cmd(phase: str, db_path: str):
+    """后台采集冻结D-1候选的涨停前快照。"""
+    db = Storage(db_path)
+    db.init_db()
+    normalized_phase = AUCTION_PHASE if phase == "auction" else OPEN_PHASE
+    try:
+        result = capture_prelimit(db, normalized_phase)
+    except Exception as exc:
+        raise click.ClickException(f"涨停前快照采集失败：{exc}") from exc
+    console.print(
+        f"涨停前快照已保存：{result.phase} | 数据日 {result.trade_date} | "
+        f"D-1候选日 {result.candidate_trade_date} | {result.stored_count} 行"
+    )
+
+
+@main.command("prelimit-status")
+@click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
+def prelimit_status_cmd(db_path: str):
+    """只读查看最近竞价/开盘阶段证据是否配对。"""
+    try:
+        status = load_prelimit_status(db_path)
+    except Exception as exc:
+        raise click.ClickException(f"涨停前快照状态读取失败：{exc}") from exc
+    console.print(
+        f"AUCTION_0925：{status.auction_date or '缺失'} | {status.auction_rows} 行"
+    )
+    console.print(f"OPEN_0931：{status.open_date or '缺失'} | {status.open_rows} 行")
+    console.print(f"最近配对：{status.paired_date or '尚未配对'}")
+    missing = "、".join(status.missing_phases) if status.missing_phases else "无"
+    console.print(f"最新数据日缺段：{missing}")
+
+
+@main.command("backfill-minutes")
+@click.option(
+    "--max-stocks",
+    type=click.IntRange(1, MAX_STOCKS_PER_RUN),
+    default=MAX_STOCKS_PER_RUN,
+    show_default=True,
+    help="本次最多补采的冻结候选数（硬上限120）",
+)
+@click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
+def backfill_minutes_cmd(max_stocks: int, db_path: str):
+    """后台低频补采冻结候选的Sina RAW 5分钟历史。"""
+    db = Storage(db_path)
+    db.init_db()
+    try:
+        result = backfill_latest_minutes(db, max_stocks=max_stocks)
+    except Exception as exc:
+        raise click.ClickException(f"5分钟RAW补采失败：{exc}") from exc
+    console.print(
+        f"RETRO_BACKFILL：候选日 {result.candidate_trade_date} | "
+        f"本次选择 {result.selected_items} | 成功 {result.successful_items} | "
+        f"失败 {result.failed_items} | 既有成功 {result.already_successful}"
+    )
+    console.print("历史bar仅从first_fetched_at起可用，不代表当时实时可见。")
+    if result.status != "SUCCESS":
+        detail = f"；{result.circuit_reason}" if result.circuit_reason else ""
+        raise click.ClickException(f"5分钟RAW补采批次未完成（{result.status}）{detail}")
+    if result.selected_items == 0:
+        console.print("冻结候选均已成功，无待恢复代码。")
+
+
+@main.command("minute-status")
+@click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
+def minute_status_cmd(db_path: str):
+    """只读查看最近冻结批次与逐股补采checkpoint。"""
+    try:
+        status = load_minute_status(db_path)
+    except Exception as exc:
+        raise click.ClickException(f"5分钟RAW状态读取失败：{exc}") from exc
+    if status.candidate_trade_date is None:
+        console.print("暂无5分钟RAW补采批次。")
+        return
+    console.print(
+        f"候选日 {status.candidate_trade_date} | 总数 {status.total_items} | "
+        f"成功 {status.successful_items} | 待处理 {status.pending_items} | "
+        f"错误 {status.error_items} | 冲突 {status.conflict_items}"
+    )
+    console.print(
+        f"bars {status.bars_count} | 完整股票日 {status.complete_days} | "
+        f"残缺股票日 {status.partial_days} | "
+        f"最近尝试 {status.last_attempt_at or '尚未开始'}"
+    )
 
 
 @main.command("daily")
@@ -160,7 +281,6 @@ def status_cmd(db_path: str, state_path: str, strict: bool):
     state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
     summary = state.get("dataset_summary", {})
     best = state.get("best") or {}
-    accepted = bool(best.get("accepted"))
     signal_dates = max(0, int(summary.get("signal_dates", 0) or 0))
     admission_days_remaining = max(0, ADMISSION_SIGNAL_DAYS - signal_dates)
     evaluation_days_remaining = max(0, FORMAL_EVALUATION_SIGNAL_DAYS - signal_dates)
@@ -188,7 +308,7 @@ def status_cmd(db_path: str, state_path: str, strict: bool):
     table.add_row("距离120日正式评估", f"还差 {evaluation_days_remaining} 日")
     table.add_row("候选因子", best.get("genome", {}).get("name", "尚未演化"))
     table.add_row(
-        "实盘闸门", "[green]已通过[/green]" if accepted else "[yellow]未通过，只观察[/yellow]"
+        "研究状态", "[yellow]LEGACY_RESEARCH_ONLY / HOLDOUT_NOT_OPENED[/yellow]"
     )
     console.print(table)
     if health.missing_dates:
@@ -292,10 +412,10 @@ def evolve_cmd(
         console.print(f"[red]没有可评估候选：{summary.get('error', '数据不足')}[/red]")
         return
 
-    console.rule("研发候选 Top 5（锁定测试不参与选优）")
+    console.rule("Development 候选 Top 5（holdout 未打开）")
     for rank, item in enumerate(outcome.evaluations[:5], 1):
         genome = item.genome
-        conclusion = "[green]可操作[/green]" if item.accepted else "[yellow]研究中[/yellow]"
+        conclusion = "[yellow]DEVELOPMENT_CANDIDATE，不可操作[/yellow]"
         console.print(f"[cyan]{rank}. {genome.name}[/cyan]（{genome.source}） {conclusion}")
         console.print(f"   结构：{describe_genome(genome)}")
         console.print(f"   规则：{describe_rule(genome)}")
@@ -303,9 +423,7 @@ def evolve_cmd(
             "   证据："
             f"训练 {item.train.trades}笔 {item.train.avg_return:+.2f}%/{item.train.win_rate:.0%}；"
             f"验证 {item.validation.trades}笔 {item.validation.avg_return:+.2f}%/"
-            f"{item.validation.win_rate:.0%}；测试 {item.test.trades}笔 "
-            f"{item.test.avg_return:+.2f}%/{item.test.win_rate:.0%}，"
-            f"盈亏比 {item.test.pnl_ratio:.2f}"
+            f"{item.validation.win_rate:.0%}；holdout 未打开"
         )
     benchmark = next(
         (
@@ -324,13 +442,12 @@ def evolve_cmd(
             f"证据：训练 {benchmark.train.trades}笔 {benchmark.train.avg_return:+.2f}%/"
             f"{benchmark.train.win_rate:.0%}；验证 {benchmark.validation.trades}笔 "
             f"{benchmark.validation.avg_return:+.2f}%/{benchmark.validation.win_rate:.0%}；"
-            f"测试 {benchmark.test.trades}笔 {benchmark.test.avg_return:+.2f}%/"
-            f"{benchmark.test.win_rate:.0%}，盈亏比 {benchmark.test.pnl_ratio:.2f}"
+            "holdout 未打开"
         )
         console.print("未准入原因：" + "；".join(benchmark.rejection_reasons))
     best = outcome.best
     if best:
-        label = "已准入因子" if best.accepted else "研发候选（不可操作）"
+        label = "DEVELOPMENT_CANDIDATE（不可操作）"
         console.print(f"{label}：{best.genome.name} | fitness={best.fitness:.3f}")
         console.print(f"结构：{describe_genome(best.genome)}")
         console.print(f"规则：{describe_rule(best.genome)}")
@@ -364,30 +481,26 @@ def _print_feature_quality(summary: dict) -> None:
     table = Table(title="有效结构基因证据（高分组 - 低分组的 T+1 收益差）")
     table.add_column("结构")
     table.add_column("开发段", justify="right")
-    table.add_column("测试段", justify="right")
     table.add_column("当前解释")
     for feature in active:
         item = quality.get(feature, {})
         development = item.get("development_spread")
-        test = item.get("test_spread")
-        if item.get("direction_consistent"):
-            if feature == "break_risk" and development is not None and development > 0:
-                interpretation = "方向反常，需重新定义"
-            elif development is not None and development > 0:
-                interpretation = "高值暂时占优"
-            else:
-                interpretation = "低值暂时占优"
+        if feature == "break_risk" and development is not None and development > 0:
+            interpretation = "开发段方向反常，需重新定义"
+        elif development is not None and development > 0:
+            interpretation = "开发段高值暂时占优"
+        elif development is not None:
+            interpretation = "开发段低值暂时占优"
         else:
-            interpretation = "方向不稳定"
+            interpretation = "开发段证据不足"
         table.add_row(
             FEATURE_LABELS.get(feature, feature),
             "—" if development is None else f"{development:+.2f}%",
-            "—" if test is None else f"{test:+.2f}%",
             interpretation,
         )
     console.print(table)
     reseal = quality.get("reseal_quality", {})
-    if reseal.get("direction_consistent") and (reseal.get("development_spread") or 0) > 0:
+    if (reseal.get("development_spread") or 0) > 0:
         console.print(
             "[bold]当前可复述假设：[/bold]有限分歧后的回封（1-3次开板）"
             "比零开板/反复炸板更值得进入次日候选；仍需新样本确认。"
@@ -400,7 +513,7 @@ def _print_feature_quality(summary: dict) -> None:
 @click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
 @click.option("--state", "state_path", default="data/limit_up_evolution.json", show_default=True)
 def scan_cmd(date: str | None, top_n: int, db_path: str, state_path: str):
-    """用锁定测试后的最佳基因生成次日条件操作卡。"""
+    """查看legacy development基因的研究卡；holdout未打开。"""
     engine = LimitUpEvolutionEngine(db_path=db_path, state_path=state_path)
     _print_cards(engine.action_cards(date=date, top_n=top_n))
 
@@ -432,7 +545,7 @@ def _print_cards(cards) -> None:
     console.print(f"退出：{first.exit_rule}")
     console.print(f"仓位：{first.position_rule}")
     if all(card.action != "CONDITIONAL_BUY" for card in cards):
-        console.print("[yellow]当前因子未通过锁定测试，系统明确给出 0 仓位，只可观察。[/yellow]")
+        console.print("[yellow]LEGACY_RESEARCH_ONLY：holdout未打开，不是已验收建议。[/yellow]")
 
 
 if __name__ == "__main__":

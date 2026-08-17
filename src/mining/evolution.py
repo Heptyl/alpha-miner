@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from src.data.pit import compile_compute_source
 from src.mining.backtester import FactorBacktester
 from src.mining.candidate_pool import CandidatePool
 from src.mining.failure_analyzer import FailureAnalyzer
@@ -42,6 +43,7 @@ class Candidate:
         self.code = code
         self.evaluation: dict | None = None
         self.accepted: bool = False
+        self.development_passed: bool = False
         self.error: str | None = None
         self.generation: int = generation
 
@@ -52,7 +54,10 @@ class Candidate:
             "config": self.config,
             "code": self.code,
             "evaluation": self.evaluation,
-            "accepted": self.accepted,
+            # Development search cannot serialize an accepted result. A
+            # caller-mutated legacy flag is deliberately discarded here.
+            "accepted": False,
+            "development_passed": self.development_passed,
             "error": self.error,
             "generation": self.generation,
         }
@@ -61,7 +66,11 @@ class Candidate:
     def from_dict(cls, d: dict) -> "Candidate":
         c = cls(d["name"], d["source"], d["config"], d.get("code"))
         c.evaluation = d.get("evaluation")
-        c.accepted = d.get("accepted", False)
+        # Legacy accepted records are demoted to development-only evidence.
+        c.accepted = False
+        c.development_passed = bool(
+            d.get("development_passed", d.get("accepted", False))
+        )
         c.error = d.get("error")
         c.generation = d.get("generation", 0)
         return c
@@ -103,6 +112,7 @@ class EvolutionEngine:
         self.mutator = FactorMutator()
         self.candidate_pool = CandidatePool(str(pool_path))
         self.accepted: list[Candidate] = []
+        self.development_candidates: list[Candidate] = []
         self.log: list[dict] = []
         self.completed_generations = 0
         self._seen_signatures: set[str] = set()
@@ -133,6 +143,7 @@ class EvolutionEngine:
         else:
             # ``--fresh`` must be deterministic even when the same engine object is reused.
             self.accepted = []
+            self.development_candidates = []
             self.log = []
             self.completed_generations = 0
             self._seen_signatures = set()
@@ -190,11 +201,15 @@ class EvolutionEngine:
                 self._seen_signatures.add(self._candidate_signature(candidate))
                 self._write_log(candidate)
 
-            newly_accepted = [candidate for candidate in candidates if candidate.accepted]
-            self._extend_accepted(newly_accepted)
-            for candidate in newly_accepted:
-                self._stage_candidate(candidate)
-            logger.info("本代验收: %d/%d", len(newly_accepted), len(candidates))
+            development_passed = [
+                candidate for candidate in candidates if candidate.development_passed
+            ]
+            self._extend_development(development_passed)
+            logger.info(
+                "本代development阈值通过: %d/%d（holdout未打开，accepted恒False）",
+                len(development_passed),
+                len(candidates),
+            )
 
             next_candidates = self._build_next_generation(candidates, population_size)
             self.completed_generations = generation_number
@@ -206,8 +221,11 @@ class EvolutionEngine:
                 generation_number, time.time() - gen_start, len(candidates),
             )
 
-        logger.info("进化完成。累计验收: %d 个因子", len(self.accepted))
-        return self.accepted
+        logger.info(
+            "进化完成。累计development候选: %d；holdout未打开",
+            len(self.development_candidates),
+        )
+        return self.development_candidates
 
     def _candidate_signature(self, candidate: Candidate) -> str:
         """候选的语义签名；忽略会无限增长但不改变逻辑的显示名。"""
@@ -259,8 +277,8 @@ class EvolutionEngine:
             mutations.extend(self._mutate_candidate(parent)[:2])
 
         crossovers: list[Candidate] = []
-        if len(self.accepted) >= 2:
-            crossovers = self._crossover(self.accepted)
+        if len(self.development_candidates) >= 2:
+            crossovers = self._crossover(self.development_candidates)
 
         fresh_seeds = self._dedupe_candidates(
             self._generate_from_knowledge(),
@@ -292,9 +310,9 @@ class EvolutionEngine:
         """
         parents = self._historical_candidates()
         parent_signatures = {self._candidate_signature(candidate) for candidate in parents}
-        for accepted in self.accepted:
-            if self._candidate_signature(accepted) not in parent_signatures:
-                parents.append(accepted)
+        for candidate in self.development_candidates:
+            if self._candidate_signature(candidate) not in parent_signatures:
+                parents.append(candidate)
         parents.sort(key=self._fitness, reverse=True)
 
         offspring: list[Candidate] = []
@@ -379,22 +397,22 @@ class EvolutionEngine:
             generation=epoch,
         )
 
-    def _extend_accepted(self, candidates: list[Candidate]) -> None:
-        existing = {self._candidate_signature(candidate) for candidate in self.accepted}
+    def _extend_development(self, candidates: list[Candidate]) -> None:
+        existing = {
+            self._candidate_signature(candidate)
+            for candidate in self.development_candidates
+        }
         for candidate in candidates:
             signature = self._candidate_signature(candidate)
             if signature not in existing:
-                self.accepted.append(candidate)
+                candidate.accepted = False
+                self.development_candidates.append(candidate)
                 existing.add(signature)
 
     def _stage_candidate(self, candidate: Candidate) -> None:
-        """样本内通过后进入观察池，而不是直接视为生产因子。"""
-        if not candidate.code or self.candidate_pool.get_status(candidate.name):
-            return
-        try:
-            self.candidate_pool.add_candidate(candidate.name, candidate.config, candidate.code)
-        except ValueError:
-            pass
+        """P0 guard: development evidence must never enter the acceptance pool."""
+        candidate.accepted = False
+        logger.warning("holdout未打开，禁止写入CandidatePool：%s", candidate.name)
 
     def _data_fingerprint(self) -> dict:
         """记录进化所用数据版本，便于识别“数据没变但一直跑”。"""
@@ -420,7 +438,9 @@ class EvolutionEngine:
             self.completed_generations = int(state.get("completed_generations", 0))
             self._seen_signatures = set(state.get("seen_signatures", []))
             self._state_data_fingerprint = state.get("data_fingerprint")
-            self.accepted = [Candidate.from_dict(item) for item in state.get("accepted", [])]
+            legacy = state.get("development_candidates", state.get("accepted", []))
+            self.development_candidates = [Candidate.from_dict(item) for item in legacy]
+            self.accepted = []
             return [Candidate.from_dict(item) for item in state.get("frontier", [])]
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning("进化 checkpoint 损坏，回退日志恢复: %s", exc)
@@ -430,7 +450,7 @@ class EvolutionEngine:
     def _restore_history_from_log(self) -> None:
         if not self.mining_log_path.exists():
             return
-        accepted: list[Candidate] = []
+        development: list[Candidate] = []
         try:
             for line in self.mining_log_path.read_text(encoding="utf-8").splitlines():
                 try:
@@ -439,25 +459,30 @@ class EvolutionEngine:
                 except (KeyError, TypeError, json.JSONDecodeError):
                     continue
                 self._seen_signatures.add(self._candidate_signature(candidate))
-                if candidate.accepted:
-                    accepted.append(candidate)
+                if candidate.development_passed:
+                    development.append(candidate)
                 self.completed_generations = max(
                     self.completed_generations,
                     int(candidate.generation or 0),
                 )
-            self._extend_accepted(accepted)
+            self._extend_development(development)
         except OSError as exc:
             logger.warning("无法读取历史挖掘日志: %s", exc)
 
     def _save_progress(self, frontier: list[Candidate], data_fingerprint: dict) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         state = {
-            "version": 1,
+            "version": 2,
+            "research_stage": "DEVELOPMENT_ONLY",
+            "holdout_opened": False,
             "updated_at": datetime.now().isoformat(),
             "completed_generations": self.completed_generations,
             "data_fingerprint": data_fingerprint,
             "seen_signatures": sorted(self._seen_signatures),
-            "accepted": [candidate.to_dict() for candidate in self.accepted],
+            "accepted": [],
+            "development_candidates": [
+                candidate.to_dict() for candidate in self.development_candidates
+            ],
             "frontier": [candidate.to_dict() for candidate in frontier],
         }
         temp_path = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
@@ -581,7 +606,6 @@ class EvolutionEngine:
             # ── 信息瀑布 ──
             "cascade_momentum": '''"""信息瀑布：首次涨停后封板稳定 → 次日高开概率高"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
     yesterday = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -620,7 +644,6 @@ def compute(universe, as_of, db):
 
             "cascade_break_crash": '''"""信息瀑布：连板股断板后反向瀑布 → 大幅下跌"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -651,7 +674,6 @@ def compute(universe, as_of, db):
 
             "seal_decay_warning": '''"""信息瀑布：封板单量3日连续下降 → 断板前兆"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -681,7 +703,6 @@ def compute(universe, as_of, db):
             # ── 三班组 ──
             "small_cap_trap": '''"""三班组：小市值+低换手+无题材连板 → 天地板风险"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -724,7 +745,6 @@ def compute(universe, as_of, db):
 
             "fund_flow_diverge_exit": '''"""三班组：超大单买+大单卖 背离在高位连板 → 出货信号"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -760,7 +780,6 @@ def compute(universe, as_of, db):
             # ── 题材生命周期 ──
             "early_theme_alpha": '''"""题材生命周期：题材启动期（1-2日，涨停1-3家）→ 未来5日收益最高"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -803,7 +822,6 @@ def compute(universe, as_of, db):
 
             "crowded_theme_decay": '''"""题材生命周期：题材拥挤度>30% → 见顶信号"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     # 全市场涨停数
@@ -848,7 +866,6 @@ def compute(universe, as_of, db):
 
             "narrative_exhaustion": '''"""题材生命周期：龙头高位换手暴增+不创新高 → 出货"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     results = {}
@@ -884,7 +901,6 @@ def compute(universe, as_of, db):
             # ── 情绪驱动 ──
             "strong_emotion_board_alpha": '''"""情绪驱动：涨停>80家 + 连板>=3 → 追高仍有正收益"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     # 全市场涨停数
@@ -913,7 +929,6 @@ def compute(universe, as_of, db):
 
             "weak_emotion_avoid": '''"""情绪驱动：涨停<20家 → 任何打板策略负期望"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     market = db.query("market_emotion", as_of,
@@ -939,7 +954,6 @@ def compute(universe, as_of, db):
 
             "emotion_reversal": '''"""情绪驱动：连续3日涨停<20家后回升 → 反转机会"""
 def compute(universe, as_of, db):
-    from datetime import timedelta
     date_str = as_of.strftime("%Y-%m-%d")
 
     # 取近5日市场情绪
@@ -996,8 +1010,6 @@ def compute(universe, as_of, db):
         else:
             # 兜底：至少返回全零 Series
             return f'''"""Auto-generated factor: {name}"""
-import pandas as pd
-
 def compute(universe, as_of, db):
     """{config.get("prediction", "")}"""
     return pd.Series(0.0, index=universe, dtype=float)
@@ -1006,9 +1018,6 @@ def compute(universe, as_of, db):
     def _build_formula_template(self, name: str, expression: str, config: dict) -> str:
         """为 formula 类型生成真实计算模板。"""
         return f'''"""Auto-generated formula factor: {name}"""
-import pandas as pd
-import numpy as np
-
 def compute(universe, as_of, db):
     """{config.get("prediction", "")}"""
     date_str = as_of.strftime("%Y-%m-%d")
@@ -1042,9 +1051,6 @@ def compute(universe, as_of, db):
         """为 conditional 类型生成可执行条件评分器。"""
         conditions_literal = repr(conditions)
         return f'''"""Auto-generated conditional factor: {name}"""
-import pandas as pd
-import re
-
 CONDITIONS = {conditions_literal}
 
 def _compare(actual, operator, expected):
@@ -1167,16 +1173,19 @@ def compute(universe, as_of, db):
             candidate.evaluation = {}
             return
 
-        # 验收判定
+        # 仅development阈值；本阶段holdout未打开，绝不验收。
         ic = candidate.evaluation.get("ic_mean", 0.0)
         icir = candidate.evaluation.get("icir", 0.0)
         win_rate = candidate.evaluation.get("win_rate", 0.0)
 
-        candidate.accepted = (
+        candidate.development_passed = (
             abs(ic) >= self.MIN_IC
             and abs(icir) >= self.MIN_ICIR
             and win_rate >= self.MIN_WIN_RATE
         )
+        candidate.accepted = False
+        candidate.evaluation["research_stage"] = "DEVELOPMENT_ONLY"
+        candidate.evaluation["holdout_opened"] = False
 
     # --------------------------------------------------
     # 变异
@@ -1255,7 +1264,6 @@ def compute(universe, as_of, db):
         elif mutation_type in {"change_lookback", "smoothing"}:
             window = int(config.get("smoothing_window") or config.get("lookback_days") or 1)
             body = f"""
-    from datetime import timedelta
     frames = []
     for offset in range({max(1, min(window, 20))}):
         values = _parent_compute(universe, as_of - timedelta(days=offset), db)
@@ -1311,11 +1319,7 @@ def compute(universe, as_of, db):
             compute 函数对象，或 None（提取失败时）
         """
         try:
-            import numpy as np
-            import pandas as pd
-            namespace = {"pd": pd, "np": np}
-            exec(code, namespace)  # noqa: S102
-            return namespace.get("compute")
+            return compile_compute_source(code, "main_process")
         except Exception as e:
             logger.warning("提取 compute 函数失败: %s", e)
             return None

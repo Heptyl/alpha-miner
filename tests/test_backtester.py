@@ -11,7 +11,6 @@ import pytest
 from src.data.storage import Storage
 from src.mining.backtester import BacktestResult, FactorBacktester
 
-
 # ============================================================
 # Fixtures
 # ============================================================
@@ -169,24 +168,29 @@ class TestBacktestResultToDict:
             sample_per_day=30.0,
             total_days=1,
             ic_series=ic_series,
+            research_stage="DEVELOPMENT_ONLY",
+            pit_mode="RETRO_DEVELOPMENT",
+            holdout_opened=False,
+            development_dates=["2026-04-24"],
+            reserved_holdout_dates=["2026-04-25"],
         )
         d = result.to_dict()
 
-        # 验证所有键都存在
-        expected_keys = {
-            "ic_mean", "icir", "win_rate", "pnl_ratio",
-            "sample_per_day", "total_days", "ic_series", "error",
+        assert d == {
+            "ic_mean": 0.05,
+            "icir": 1.2,
+            "win_rate": 0.6,
+            "pnl_ratio": 1.5,
+            "sample_per_day": 30.0,
+            "total_days": 1,
+            "ic_series": ic_series,
+            "error": None,
+            "research_stage": "DEVELOPMENT_ONLY",
+            "pit_mode": "RETRO_DEVELOPMENT",
+            "holdout_opened": False,
+            "development_dates": ["2026-04-24"],
+            "reserved_holdout_dates": ["2026-04-25"],
         }
-        assert set(d.keys()) == expected_keys
-        # 验证值正确
-        assert d["ic_mean"] == 0.05
-        assert d["icir"] == 1.2
-        assert d["win_rate"] == 0.6
-        assert d["pnl_ratio"] == 1.5
-        assert d["sample_per_day"] == 30.0
-        assert d["total_days"] == 1
-        assert d["ic_series"] == ic_series
-        assert d["error"] is None
 
     def test_to_dict_with_error(self):
         """带错误的 BacktestResult 序列化。"""
@@ -198,3 +202,8 @@ class TestBacktestResultToDict:
         assert d["error"] == "交易日数据不足: 5 天"
         assert d["ic_mean"] == 0.0
         assert d["ic_series"] == []
+        assert d["research_stage"] == "DEVELOPMENT_ONLY"
+        assert d["pit_mode"] == "RETRO_DEVELOPMENT"
+        assert d["holdout_opened"] is False
+        assert d["development_dates"] == []
+        assert d["reserved_holdout_dates"] == []

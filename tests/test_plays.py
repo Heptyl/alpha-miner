@@ -1,6 +1,7 @@
 """Synthetic-data tests for the three-to-four PAPER vertical slice."""
 
 import math
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,7 +9,13 @@ import pytest
 
 from src.data.storage import Storage
 from src.mining.playbook import load_latest_play_cards, save_play_card
-from src.mining.plays import build_three_to_four_card, settle_three_to_four_cards
+from src.mining.plays import (
+    build_theme_new_entrant_diffusion_card,
+    build_three_to_four_card,
+    load_usable_audit_dates,
+    settle_theme_new_entrant_diffusion_cards,
+    settle_three_to_four_cards,
+)
 
 
 def _storage(tmp_path: Path) -> Storage:
@@ -80,6 +87,125 @@ def _collection_run(
     )
 
 
+def _pool(
+    storage: Storage,
+    table: str,
+    code: str,
+    trade_date: str,
+    *,
+    name: str,
+    industry: str,
+    amount: float,
+    snapshot: str,
+) -> None:
+    assert table in {"zt_pool", "strong_pool"}
+    storage.execute_write(
+        f"""
+        INSERT INTO {table}
+            (stock_code, trade_date, name, industry, amount, snapshot_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (code, trade_date, name, industry, amount, snapshot),
+    )
+
+
+def _h1_signal_data(storage: Storage, previous_date: str, signal_date: str) -> None:
+    _calendar(storage, [previous_date, signal_date])
+    _collection_run(storage, previous_date, "ok", f"{previous_date} 16:10:00")
+    _collection_run(storage, signal_date, "ok", f"{signal_date} 16:10:00")
+    for index, code in enumerate(("600101", "600102"), 1):
+        _pool(
+            storage,
+            "zt_pool",
+            code,
+            previous_date,
+            name=f"前日涨停{index}",
+            industry="机器人",
+            amount=100 + index,
+            snapshot=f"{previous_date} 16:0{index}:00",
+        )
+    for index, code in enumerate(("600101", "600102", "600103"), 1):
+        _pool(
+            storage,
+            "zt_pool",
+            code,
+            signal_date,
+            name=f"当日涨停{index}",
+            industry="机器人",
+            amount=200 + index,
+            snapshot=f"{signal_date} 16:0{index}:00",
+        )
+
+
+def _legacy_day(
+    storage: Storage,
+    trade_date: str,
+    snapshot: str,
+    *,
+    market_rows: int = 4_000,
+    include_strong: bool = True,
+) -> None:
+    connection = sqlite3.connect(storage.db_path)
+    try:
+        connection.executemany(
+            """
+            INSERT INTO daily_price
+                (stock_code, trade_date, open, high, low, close, volume, snapshot_time)
+            VALUES (?, ?, 10, 10, 10, 10, 100, ?)
+            """,
+            ((f"{index:06d}", trade_date, snapshot) for index in range(market_rows)),
+        )
+        connection.executemany(
+            """
+            INSERT INTO zt_pool
+                (stock_code, trade_date, name, industry, amount, snapshot_time)
+            VALUES (?, ?, ?, '机器人', 100, ?)
+            """,
+            (
+                ("600101", trade_date, "前日涨停1", snapshot),
+                ("600102", trade_date, "前日涨停2", snapshot),
+            ),
+        )
+        if include_strong:
+            connection.execute(
+                """
+                INSERT INTO strong_pool
+                    (stock_code, trade_date, name, industry, amount, snapshot_time)
+                VALUES ('600299', ?, '前日强势', '机器人', 100, ?)
+                """,
+                (trade_date, snapshot),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _current_h1_day(storage: Storage, trade_date: str) -> None:
+    _collection_run(storage, trade_date, "ok", f"{trade_date} 16:10:00")
+    for index, code in enumerate(("600101", "600102", "600103"), 1):
+        _pool(
+            storage,
+            "zt_pool",
+            code,
+            trade_date,
+            name=f"当日涨停{index}",
+            industry="机器人",
+            amount=200 + index,
+            snapshot=f"{trade_date} 16:0{index}:00",
+        )
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        trade_date,
+        name="新强势候选",
+        industry="机器人",
+        amount=300,
+        snapshot=f"{trade_date} 16:05:00",
+    )
+    _price(storage, "600201", trade_date, close=10.0, snapshot=f"{trade_date} 16:06:00")
+
+
 def test_current_candidates_use_only_signal_day_latest_snapshots(tmp_path):
     storage = _storage(tmp_path)
     _zt(storage, "000002", "2026-01-08", 3, name="乙")
@@ -132,6 +258,41 @@ def test_default_date_fails_without_successful_collection_audit(tmp_path):
 
     with pytest.raises(ValueError, match="no successfully audited"):
         build_three_to_four_card(storage)
+
+
+def test_default_date_rejects_intraday_ok_and_uses_older_post_close_day(tmp_path):
+    storage = _storage(tmp_path)
+    _zt(storage, "CLOSED", "2026-01-08", 3)
+    _collection_run(storage, "2026-01-08", "ok", "2026-01-08 16:10:00")
+    _zt(storage, "INTRADAY", "2026-01-09", 3)
+    _collection_run(storage, "2026-01-09", "ok", "2026-01-09 11:00:00")
+
+    card = build_three_to_four_card(storage)
+
+    assert card.signal_trade_date == "2026-01-08"
+    assert card.candidates[0]["stock_code"] == "CLOSED"
+
+
+def test_usable_audit_dates_use_latest_attempt_and_post_close_time(tmp_path):
+    storage = _storage(tmp_path)
+    _collection_run(storage, "2026-01-05", "ok", "2026-01-05 11:00:00")
+    assert "2026-01-05" not in load_usable_audit_dates(storage)
+
+    _collection_run(storage, "2026-01-05", "ok", "2026-01-05 16:00:00")
+    assert "2026-01-05" in load_usable_audit_dates(storage)
+
+    _collection_run(storage, "2026-01-05", "missing", "2026-01-05 16:10:00")
+    assert "2026-01-05" not in load_usable_audit_dates(storage)
+
+    _collection_run(storage, "2026-01-06", "ok", "2026-01-07 09:00:00")
+    _collection_run(storage, "2026-01-08", "ok", "2026-01-07 16:00:00")
+    usable = load_usable_audit_dates(storage)
+    assert "2026-01-06" in usable
+    assert "2026-01-08" not in usable
+
+    _collection_run(storage, "2026-01-09", "ok", "2026-01-09 16:00:00")
+    _collection_run(storage, "2026-01-09", "missing", "2026-01-09 16:00:00")
+    assert "2026-01-09" not in load_usable_audit_dates(storage)
 
 
 def test_build_validates_generated_at_before_return(tmp_path):
@@ -345,6 +506,22 @@ def test_unaudited_intraday_rows_do_not_settle_planned_card(tmp_path):
     assert loaded.candidates[0]["paper_status"] == "PLANNED"
 
 
+def test_latest_failed_audit_does_not_settle_after_earlier_ok(tmp_path):
+    storage = _storage(tmp_path)
+    _calendar(storage, ["2026-01-05", "2026-01-06"])
+    _zt(storage, "LATE_FAIL", "2026-01-05", 3)
+    card = build_three_to_four_card(storage, signal_date="2026-01-05")
+    save_play_card(storage, card)
+    _zt(storage, "LATE_FAIL", "2026-01-06", 4, open_count=1)
+    _price(storage, "LATE_FAIL", "2026-01-06", high=10.0, low=9.0, close=10.0)
+    _collection_run(storage, "2026-01-06", "ok", "2026-01-06 16:00:00")
+    _collection_run(storage, "2026-01-06", "missing", "2026-01-06 16:10:00")
+
+    assert settle_three_to_four_cards(storage) == []
+    loaded = load_latest_play_cards(storage)[0]
+    assert loaded.candidates[0]["paper_status"] == "PLANNED"
+
+
 def test_legacy_candidate_without_status_is_treated_as_planned(tmp_path):
     storage = _storage(tmp_path)
     _calendar(storage, ["2026-01-05", "2026-01-06"])
@@ -362,3 +539,379 @@ def test_legacy_candidate_without_status_is_treated_as_planned(tmp_path):
     assert settled.paper_status == "TRIGGERED"
     assert settled.candidates[0]["paper_status"] == "TRIGGERED"
     assert settled.candidates[0]["entry_price"] == 10.0
+
+
+def test_h1_freezes_latest_snapshots_and_preregistered_rank_one(tmp_path):
+    storage = _storage(tmp_path)
+    previous_date = "2026-01-05"
+    signal_date = "2026-01-06"
+    _h1_signal_data(storage, previous_date, signal_date)
+    _pool(
+        storage,
+        "zt_pool",
+        "600103",
+        signal_date,
+        name="旧快照",
+        industry="错误行业",
+        amount=1,
+        snapshot=f"{signal_date} 15:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="排名一",
+        industry="机器人",
+        amount=100,
+        snapshot=f"{signal_date} 15:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="排名一新快照",
+        industry="机器人",
+        amount=300,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600202",
+        signal_date,
+        name="排名二",
+        industry="机器人",
+        amount=200,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600299",
+        previous_date,
+        name="前日强势",
+        industry="机器人",
+        amount=500,
+        snapshot=f"{previous_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600299",
+        signal_date,
+        name="前日强势",
+        industry="机器人",
+        amount=600,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600203",
+        signal_date,
+        name="ST风险",
+        industry="机器人",
+        amount=700,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "830001",
+        signal_date,
+        name="北交样本",
+        industry="机器人",
+        amount=800,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _price(storage, "600201", signal_date, close=10.0, snapshot=f"{signal_date} 16:01:00")
+    _price(storage, "600202", signal_date, close=9.0, snapshot=f"{signal_date} 16:01:00")
+
+    card = build_theme_new_entrant_diffusion_card(
+        storage,
+        signal_date=signal_date,
+        generated_at=f"{signal_date}T16:20:00+08:00",
+    )
+
+    assert card.play_id == "theme_new_entrant_diffusion_v1"
+    assert card.paper_status == "PLANNED"
+    assert card.admission_status == "NOT_ADMITTED"
+    assert len(card.candidates) == 1
+    candidate = card.candidates[0]
+    assert candidate["stock_code"] == "600201"
+    assert candidate["stock_name"] == "排名一新快照"
+    assert candidate["previous_zt_breadth"] == 2
+    assert candidate["current_zt_breadth"] == 3
+    assert candidate["signal_amount"] == 300
+    assert candidate["signal_close"] == 10.0
+    assert candidate["allowed_open_low"] == 9.8
+    assert candidate["allowed_open_high"] == 10.5
+    assert card.historical_evidence["research_status"] == "DEVELOPMENT_CANDIDATE"
+    assert card.historical_evidence["usage_status"] == "PAPER_ONLY"
+    assert card.historical_evidence["previous_day_audit_source"] == "EXPLICIT_AUDIT"
+    assert card.historical_evidence["independent_signal_days"] == 12
+    assert card.historical_evidence["holm_significant"] is False
+    save_play_card(storage, card)
+    assert load_latest_play_cards(storage) == [card]
+
+
+def test_h1_does_not_use_stale_previous_day_or_bad_signal_audit(tmp_path):
+    storage = _storage(tmp_path)
+    _calendar(storage, ["2026-01-05", "2026-01-06", "2026-01-07"])
+    _collection_run(storage, "2026-01-05", "ok", "2026-01-05 16:10:00")
+    _collection_run(storage, "2026-01-07", "ok", "2026-01-07 16:10:00")
+    for code in ("600101", "600102", "600103"):
+        _pool(
+            storage,
+            "zt_pool",
+            code,
+            "2026-01-07",
+            name=code,
+            industry="机器人",
+            amount=100,
+            snapshot="2026-01-07 16:00:00",
+        )
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        "2026-01-07",
+        name="候选",
+        industry="机器人",
+        amount=200,
+        snapshot="2026-01-07 16:00:00",
+    )
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date="2026-01-07")
+    assert card.candidates == []
+    assert "精确前一交易日2026-01-06缺少可信盘后证据" in card.historical_evidence[
+        "empty_reason"
+    ]
+
+    with pytest.raises(ValueError, match="no successful collection audit"):
+        build_theme_new_entrant_diffusion_card(storage, signal_date="2026-01-06")
+
+
+def test_h1_accepts_strict_legacy_post_close_previous_day(tmp_path):
+    storage = _storage(tmp_path)
+    _legacy_day(storage, "2026-08-14", "2026-08-14 16:58:00")
+    _current_h1_day(storage, "2026-08-17")
+
+    card = build_theme_new_entrant_diffusion_card(
+        storage,
+        signal_date="2026-08-17",
+        generated_at="2026-08-17T16:20:00+08:00",
+    )
+
+    assert [candidate["stock_code"] for candidate in card.candidates] == ["600201"]
+    assert (
+        card.historical_evidence["previous_day_audit_source"]
+        == "LEGACY_POST_CLOSE_SNAPSHOT"
+    )
+    assert "旧版三表盘后快照" in card.historical_evidence["data_limitations"]
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "market_rows", "include_strong"),
+    [
+        ("2026-08-14 14:00:00", 4_000, True),
+        ("2026-08-15 09:00:00", 4_000, True),
+        ("2026-08-14 16:58:00", 3_999, True),
+        ("2026-08-14 16:58:00", 4_000, False),
+    ],
+)
+def test_h1_rejects_weak_legacy_previous_day_proof(
+    tmp_path,
+    snapshot,
+    market_rows,
+    include_strong,
+):
+    storage = _storage(tmp_path)
+    _legacy_day(
+        storage,
+        "2026-08-14",
+        snapshot,
+        market_rows=market_rows,
+        include_strong=include_strong,
+    )
+    _current_h1_day(storage, "2026-08-17")
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date="2026-08-17")
+
+    assert card.candidates == []
+    assert card.historical_evidence["previous_day_audit_source"] == "UNAVAILABLE"
+    assert "缺少可信盘后证据" in card.historical_evidence["empty_reason"]
+
+
+def test_h1_never_falls_back_when_previous_day_has_failed_audit(tmp_path):
+    storage = _storage(tmp_path)
+    _legacy_day(storage, "2026-08-14", "2026-08-14 16:58:00")
+    _collection_run(storage, "2026-08-14", "missing", "2026-08-14 19:10:00")
+    _current_h1_day(storage, "2026-08-17")
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date="2026-08-17")
+
+    assert card.candidates == []
+    assert card.historical_evidence["previous_day_audit_source"] == "UNAVAILABLE"
+
+
+def test_h1_signal_day_never_uses_legacy_snapshot_fallback(tmp_path):
+    storage = _storage(tmp_path)
+    _legacy_day(storage, "2026-08-14", "2026-08-14 16:58:00")
+    _legacy_day(storage, "2026-08-17", "2026-08-17 16:58:00")
+
+    with pytest.raises(ValueError, match="no successful collection audit"):
+        build_theme_new_entrant_diffusion_card(storage, signal_date="2026-08-17")
+
+
+def test_h1_requires_acceleration_new_entrant_and_never_backfills_rank_two(tmp_path):
+    storage = _storage(tmp_path)
+    previous_date = "2026-01-05"
+    signal_date = "2026-01-06"
+    _h1_signal_data(storage, previous_date, signal_date)
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="排名一缺收盘",
+        industry="机器人",
+        amount=300,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600202",
+        signal_date,
+        name="排名二有收盘",
+        industry="机器人",
+        amount=200,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _price(storage, "600202", signal_date, close=9.0)
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date=signal_date)
+
+    assert card.candidates == []
+    assert "本日0只" in card.historical_evidence["empty_reason"]
+
+
+def test_h1_requires_breadth_to_strictly_exceed_previous_day(tmp_path):
+    storage = _storage(tmp_path)
+    previous_date = "2026-01-05"
+    signal_date = "2026-01-06"
+    _h1_signal_data(storage, previous_date, signal_date)
+    _pool(
+        storage,
+        "zt_pool",
+        "600104",
+        previous_date,
+        name="前日第三只",
+        industry="机器人",
+        amount=103,
+        snapshot=f"{previous_date} 16:04:00",
+    )
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="未加速候选",
+        industry="机器人",
+        amount=300,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _price(storage, "600201", signal_date, close=10.0)
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date=signal_date)
+
+    assert card.candidates == []
+    assert card.historical_evidence["current_candidate_count"] == 0
+
+
+def test_h1_lifecycle_enters_d_plus_one_and_exits_d_plus_three(tmp_path):
+    storage = _storage(tmp_path)
+    previous_date = "2026-01-02"
+    signal_date = "2026-01-05"
+    _h1_signal_data(storage, previous_date, signal_date)
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="前向候选",
+        industry="机器人",
+        amount=300,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _price(storage, "600201", signal_date, close=10.0)
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date=signal_date)
+    save_play_card(storage, card)
+
+    for trade_date in ("2026-01-06", "2026-01-07", "2026-01-08"):
+        _price(storage, "CAL2", trade_date)
+    _price(
+        storage,
+        "600201",
+        "2026-01-06",
+        open_price=10.2,
+        high=10.5,
+        low=10.0,
+    )
+    _price(storage, "600201", "2026-01-07", open_price=99.0)
+    _price(storage, "600201", "2026-01-08", open_price=11.22)
+    _collection_run(storage, "2026-01-06", "ok", "2026-01-06 16:10:00")
+
+    triggered = settle_theme_new_entrant_diffusion_cards(storage)
+    assert triggered[0].paper_status == "TRIGGERED"
+    candidate = triggered[0].candidates[0]
+    assert candidate["entry_trade_date"] == "2026-01-06"
+    assert candidate["entry_price"] == 10.2
+    save_play_card(storage, triggered[0])
+
+    _collection_run(storage, "2026-01-07", "ok", "2026-01-07 16:10:00")
+    assert settle_theme_new_entrant_diffusion_cards(storage) == []
+
+    _collection_run(storage, "2026-01-08", "ok", "2026-01-08 16:10:00")
+    completed = settle_theme_new_entrant_diffusion_cards(storage)
+    candidate = completed[0].candidates[0]
+    assert completed[0].paper_status == "COMPLETED"
+    assert candidate["exit_trade_date"] == "2026-01-08"
+    assert candidate["exit_price"] == 11.22
+    assert candidate["net_return_pct"] == pytest.approx(9.8)
+
+
+def test_h1_builder_does_not_reselect_from_future_pool(tmp_path):
+    storage = _storage(tmp_path)
+    previous_date = "2026-01-05"
+    signal_date = "2026-01-06"
+    _h1_signal_data(storage, previous_date, signal_date)
+    _pool(
+        storage,
+        "strong_pool",
+        "600201",
+        signal_date,
+        name="冻结候选",
+        industry="机器人",
+        amount=200,
+        snapshot=f"{signal_date} 16:00:00",
+    )
+    _price(storage, "600201", signal_date, close=10.0)
+    _pool(
+        storage,
+        "strong_pool",
+        "600999",
+        "2026-01-07",
+        name="未来高额样本",
+        industry="机器人",
+        amount=999999,
+        snapshot="2026-01-07 16:00:00",
+    )
+    _price(storage, "600999", "2026-01-07", close=20.0)
+
+    card = build_theme_new_entrant_diffusion_card(storage, signal_date=signal_date)
+
+    assert [candidate["stock_code"] for candidate in card.candidates] == ["600201"]

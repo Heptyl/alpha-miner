@@ -7,6 +7,7 @@ tradable, and sell no earlier than T2 because of T+1 settlement.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -112,9 +113,11 @@ class LimitUpEvaluation:
     genome: LimitUpGenome
     train: TradeStats
     validation: TradeStats
-    test: TradeStats
     fitness: float
     accepted: bool = False
+    development_passed: bool = False
+    research_status: str = "LEGACY_RESEARCH_ONLY"
+    holdout_status: str = "HOLDOUT_NOT_OPENED"
     rejection_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -122,9 +125,11 @@ class LimitUpEvaluation:
             "genome": asdict(self.genome),
             "train": asdict(self.train),
             "validation": asdict(self.validation),
-            "test": asdict(self.test),
             "fitness": self.fitness,
-            "accepted": self.accepted,
+            "accepted": False,
+            "development_passed": self.development_passed,
+            "research_status": self.research_status,
+            "holdout_status": self.holdout_status,
             "rejection_reasons": self.rejection_reasons,
         }
 
@@ -149,7 +154,7 @@ class LimitUpActionCard:
 
 
 class LimitUpEvolutionEngine:
-    """Evolve structural limit-up factor combinations and lock a chronological test set."""
+    """Legacy structural search restricted to development data only."""
 
     def __init__(
         self,
@@ -171,6 +176,10 @@ class LimitUpEvolutionEngine:
         if generations < 1 or population_size < 4:
             raise ValueError("generations must be >=1 and population_size must be >=4")
         events, summary = self.build_event_dataset()
+        # Keep the research boundary visible even for legacy/mocked builders.
+        summary.setdefault("research_status", "LEGACY_RESEARCH_ONLY")
+        summary.setdefault("holdout_status", "HOLDOUT_NOT_OPENED")
+        summary.setdefault("holdout_opened", False)
         if events.empty:
             return LimitUpOutcome([], summary, None)
 
@@ -200,9 +209,7 @@ class LimitUpEvolutionEngine:
             ]
 
         all_evaluations.sort(key=lambda item: item.fitness, reverse=True)
-        best = next((item for item in all_evaluations if item.accepted), None)
-        if best is None and all_evaluations:
-            best = all_evaluations[0]
+        best = all_evaluations[0] if all_evaluations else None
         outcome = LimitUpOutcome(all_evaluations, summary, best)
         self._save(outcome)
         return outcome
@@ -211,26 +218,78 @@ class LimitUpEvolutionEngine:
         old_mode = self.db.backtest_mode
         self.db.backtest_mode = True
         try:
-            price = self.db.query("daily_price", datetime.now(), bypass_snapshot=True)
-            price = dedup_latest(price)
-            if price.empty:
-                return pd.DataFrame(), {"error": "daily_price empty"}
-            price_weekday = pd.to_datetime(price["trade_date"], errors="coerce").dt.weekday.lt(5)
-            ignored_price_dates = sorted(
-                price.loc[~price_weekday, "trade_date"].dropna().astype(str).unique().tolist()
+            calendar_rows = self.db.execute(
+                """
+                SELECT trade_date, COUNT(DISTINCT stock_code) AS stocks
+                FROM daily_price GROUP BY trade_date ORDER BY trade_date
+                """
             )
-            price = price.loc[price_weekday].copy()
-            if price.empty:
+            if not calendar_rows:
+                return pd.DataFrame(), {"error": "daily_price empty"}
+            ignored_price_dates = sorted(
+                str(row["trade_date"])
+                for row in calendar_rows
+                if pd.Timestamp(str(row["trade_date"])).weekday() >= 5
+            )
+            dates = [
+                str(row["trade_date"])
+                for row in calendar_rows
+                if int(row["stocks"] or 0) >= self.min_market_rows
+                and pd.Timestamp(str(row["trade_date"])).weekday() < 5
+            ]
+            if not dates:
                 return pd.DataFrame(), {
                     "error": "daily_price has no trading-day rows",
                     "excluded_non_trading_dates": ignored_price_dates,
                 }
-            counts = price.groupby("trade_date")["stock_code"].nunique()
-            dates = sorted(counts[counts >= self.min_market_rows].index.tolist())
-            price_index = price.set_index(["trade_date", "stock_code"]).sort_index()
             date_position = {date: index for index, date in enumerate(dates)}
+            signal_date_rows = self.db.execute(
+                "SELECT DISTINCT trade_date FROM zt_pool ORDER BY trade_date"
+            )
+            all_signal_dates = [
+                str(row["trade_date"])
+                for row in signal_date_rows
+                if str(row.get("trade_date") or "") in date_position
+                and pd.Timestamp(str(row["trade_date"])).weekday() < 5
+                and date_position[str(row["trade_date"])] + 3 < len(dates)
+            ]
+            holdout_start = max(1, int(len(all_signal_dates) * 0.80))
+            reserved_holdout_dates = all_signal_dates[holdout_start:]
+            raw_development_dates = all_signal_dates[:holdout_start]
+            holdout_boundary = (
+                reserved_holdout_dates[0] if reserved_holdout_dates else None
+            )
+            development_signal_dates = [
+                signal_date
+                for signal_date in raw_development_dates
+                if holdout_boundary is None
+                or dates[date_position[signal_date] + 3] < holdout_boundary
+            ]
+            if not development_signal_dates:
+                return pd.DataFrame(), {
+                    "error": "development signal dates empty",
+                    "holdout_opened": False,
+                }
+            required_price_end = dates[
+                date_position[development_signal_dates[-1]] + 3
+            ]
+            price = self.db.query(
+                "daily_price",
+                datetime.now(),
+                where="trade_date <= ?",
+                params=(required_price_end,),
+                bypass_snapshot=True,
+            )
+            price = dedup_latest(price)
+            price_index = price.set_index(["trade_date", "stock_code"]).sort_index()
 
-            zt = self.db.query("zt_pool", datetime.now(), bypass_snapshot=True)
+            zt = self.db.query(
+                "zt_pool",
+                datetime.now(),
+                where="trade_date <= ?",
+                params=(development_signal_dates[-1],),
+                bypass_snapshot=True,
+            )
             zt = dedup_latest(zt)
             ignored_signal_dates: list[str] = []
             if not zt.empty:
@@ -241,7 +300,7 @@ class LimitUpEvolutionEngine:
                 zt = zt.loc[zt_weekday].copy()
             frames: list[pd.DataFrame] = []
             usable_dates: list[str] = []
-            for signal_date in sorted(zt["trade_date"].unique()) if not zt.empty else []:
+            for signal_date in development_signal_dates:
                 position = date_position.get(signal_date)
                 if position is None or position + 3 >= len(dates):
                     continue
@@ -302,6 +361,18 @@ class LimitUpEvolutionEngine:
             summary = {
                 "calendar_dates": len(dates),
                 "signal_dates": len(unique_dates),
+                "all_signal_dates": len(all_signal_dates),
+                "development_signal_dates": len(unique_dates),
+                "reserved_holdout_dates": len(reserved_holdout_dates),
+                "development_date_values": unique_dates,
+                "reserved_holdout_date_values": reserved_holdout_dates,
+                "holdout_boundary": holdout_boundary,
+                "holdout_opened": False,
+                "research_status": "LEGACY_RESEARCH_ONLY",
+                "holdout_status": "HOLDOUT_NOT_OPENED",
+                "development_date_hash": hashlib.sha256(
+                    "|".join(unique_dates).encode("utf-8")
+                ).hexdigest(),
                 "events": len(events),
                 "first_signal_date": unique_dates[0] if unique_dates else None,
                 "last_signal_date": unique_dates[-1] if unique_dates else None,
@@ -367,8 +438,7 @@ class LimitUpEvolutionEngine:
             .fillna(0)
             .mean()
         )
-        development_dates = set(dates[: max(1, int(len(dates) * 0.80))])
-        test_dates = set(dates[max(1, int(len(dates) * 0.80)) :])
+        development_dates = set(dates)
         quality: dict[str, dict] = {}
         active: list[str] = []
 
@@ -405,9 +475,6 @@ class LimitUpEvolutionEngine:
             dev_days, dev_spread = spread(
                 events[events["signal_date"].isin(development_dates)], feature
             )
-            test_days, test_spread = spread(
-                events[events["signal_date"].isin(test_dates)], feature
-            )
             if feature == "market_heat":
                 reason = "日内常量，不能改变当日股票排序"
                 is_active = False
@@ -421,11 +488,6 @@ class LimitUpEvolutionEngine:
                 reason = "可参与演化"
                 is_active = True
                 active.append(feature)
-            consistent = bool(
-                dev_spread is not None
-                and test_spread is not None
-                and dev_spread * test_spread > 0
-            )
             quality[feature] = {
                 "active": is_active,
                 "reason": reason,
@@ -433,9 +495,7 @@ class LimitUpEvolutionEngine:
                 "variation_days": within_days,
                 "development_spread": dev_spread,
                 "development_days": dev_days,
-                "test_spread": test_spread,
-                "test_days": test_days,
-                "direction_consistent": consistent,
+                "research_scope": "DEVELOPMENT_ONLY",
             }
         return quality, active
 
@@ -445,26 +505,32 @@ class LimitUpEvolutionEngine:
         events: pd.DataFrame,
         summary: dict,
     ) -> LimitUpEvaluation:
+        allowed_dates = summary.get("development_date_values")
+        if allowed_dates:
+            events = events[events["signal_date"].isin(set(allowed_dates))]
+        else:
+            all_dates = sorted(events["signal_date"].unique())
+            development_end = max(1, int(len(all_dates) * 0.80))
+            events = events[
+                events["signal_date"].isin(set(all_dates[:development_end]))
+            ]
         dates = sorted(events["signal_date"].unique())
-        train_end = max(1, int(len(dates) * 0.60))
-        validation_end = max(train_end + 1, int(len(dates) * 0.80))
-        validation_end = min(validation_end, max(len(dates) - 1, train_end + 1))
+        train_end = max(1, int(len(dates) * 0.75))
+        train_end = min(train_end, max(1, len(dates) - 1))
         train_dates = set(dates[:train_end])
-        validation_dates = set(dates[train_end:validation_end])
-        test_dates = set(dates[validation_end:])
+        validation_dates = set(dates[train_end:])
 
         train = self._trade_stats(events[events["signal_date"].isin(train_dates)], genome)
         validation = self._trade_stats(events[events["signal_date"].isin(validation_dates)], genome)
-        test = self._trade_stats(events[events["signal_date"].isin(test_dates)], genome)
         fitness = self._fitness(train, validation)
-        reasons = self._rejection_reasons(train, validation, test, summary)
+        reasons = self._rejection_reasons(train, validation, summary)
         return LimitUpEvaluation(
             genome=genome,
             train=train,
             validation=validation,
-            test=test,
             fitness=round(fitness, 6),
-            accepted=not reasons,
+            accepted=False,
+            development_passed=not reasons,
             rejection_reasons=reasons,
         )
 
@@ -548,7 +614,6 @@ class LimitUpEvolutionEngine:
         self,
         train: TradeStats,
         validation: TradeStats,
-        test: TradeStats,
         summary: dict,
     ) -> list[str]:
         reasons = []
@@ -556,16 +621,12 @@ class LimitUpEvolutionEngine:
             reasons.append(
                 f"可用涨停信号日不足: {summary.get('signal_dates', 0)}<{self.min_signal_dates}"
             )
-        if train.trades < 30 or validation.trades < 10 or test.trades < 10:
+        if train.trades < 30 or validation.trades < 10:
             reasons.append(
-                f"样本不足: train/validation/test={train.trades}/{validation.trades}/{test.trades}"
+                f"development样本不足: train/validation={train.trades}/{validation.trades}"
             )
-        if min(train.avg_return, validation.avg_return, test.avg_return) <= 0:
-            reasons.append("训练/验证/测试至少一段平均收益非正")
-        if test.win_rate < 0.52:
-            reasons.append(f"锁定测试胜率不足: {test.win_rate:.1%}<52%")
-        if test.pnl_ratio < 1.05:
-            reasons.append(f"锁定测试盈亏比不足: {test.pnl_ratio:.2f}<1.05")
+        if min(train.avg_return, validation.avg_return) <= 0:
+            reasons.append("development训练/验证至少一段平均收益非正")
         return reasons
 
     def _initial_population(self, population_size: int) -> list[LimitUpGenome]:
@@ -807,8 +868,11 @@ class LimitUpEvolutionEngine:
     def _save(self, outcome: LimitUpOutcome) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "updated_at": datetime.now().isoformat(),
+            "research_status": "LEGACY_RESEARCH_ONLY",
+            "holdout_status": "HOLDOUT_NOT_OPENED",
+            "accepted": False,
             "dataset_summary": outcome.dataset_summary,
             "best": outcome.best.to_dict() if outcome.best else None,
             "top_evaluations": [item.to_dict() for item in outcome.evaluations[:20]],
@@ -828,9 +892,9 @@ class LimitUpEvolutionEngine:
             genome=LimitUpGenome.from_dict(best["genome"]),
             train=TradeStats(**best["train"]),
             validation=TradeStats(**best["validation"]),
-            test=TradeStats(**best["test"]),
             fitness=best["fitness"],
-            accepted=best["accepted"],
+            accepted=False,
+            development_passed=best.get("development_passed", False),
             rejection_reasons=best.get("rejection_reasons", []),
         )
         if date is None:
@@ -890,7 +954,7 @@ class LimitUpEvolutionEngine:
                         "且非一字涨停；否则放弃"
                     ),
                     exit_rule=f"买入后第 {genome.holding_days} 个完整交易日收盘退出（遵守 T+1）",
-                    position_rule="单票不超过 10%，最多 3 只；未通过锁定测试时仓位为 0",
+                    position_rule="LEGACY_RESEARCH_ONLY；HOLDOUT_NOT_OPENED，不可实盘准入",
                     reasons=reasons,
                 )
             )

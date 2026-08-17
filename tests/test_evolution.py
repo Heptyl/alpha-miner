@@ -1,8 +1,6 @@
 """进化引擎测试 — mock Anthropic API 的完整进化流程。"""
 
 import json
-import tempfile
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,7 +9,6 @@ import yaml
 
 from src.mining.evolution import Candidate, EvolutionEngine
 from src.mining.sandbox import Sandbox
-
 
 # ============================================================
 # Helper
@@ -76,8 +73,16 @@ class TestCandidate:
         assert c2.name == "test"
         assert c2.source == "knowledge"
         assert c2.evaluation == {"ic_mean": 0.05}
-        assert c2.accepted is True
+        assert c2.accepted is False
+        assert c2.development_passed is False
         assert c2.generation == 3
+
+        legacy = dict(d)
+        legacy.pop("development_passed")
+        legacy["accepted"] = True
+        migrated = Candidate.from_dict(legacy)
+        assert migrated.accepted is False
+        assert migrated.development_passed is True
 
 
 class TestEvolutionEngine:
