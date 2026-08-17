@@ -5,9 +5,9 @@
 交付物三：持仓风险预警（三班组条件 + 资金流背离）
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -17,7 +17,6 @@ from src.data.storage import Storage
 from src.drift.ic_tracker import ICTracker
 from src.drift.regime import RegimeDetector
 from src.factors.registry import FactorRegistry
-
 
 # ── 数据结构 ──────────────────────────────────────────────
 
@@ -71,6 +70,7 @@ class MarketThermometer:
     suggested_position: float = 0.0  # 0-1 建议仓位比例
     active_factors: list[dict] = field(default_factory=list)  # {name, ic, trend, status}
     regime_note: str = ""
+    data_sufficient: bool = False
 
 
 # ── regime 权重表 ────────────────────────────────────────
@@ -123,6 +123,21 @@ EMOTION_POSITION = {
 }
 
 
+def normalize_holdings(holdings: list[object]) -> list[str]:
+    """Validate holding codes as six ASCII digits without numeric conversion."""
+    normalized = []
+    for raw_code in holdings:
+        if not isinstance(raw_code, str):
+            raise ValueError(
+                f"持仓代码必须是 6 位数字字符串，收到类型 {type(raw_code).__name__}"
+            )
+        code = raw_code.strip()
+        if re.fullmatch(r"[0-9]{6}", code) is None:
+            raise ValueError(f"持仓代码必须是 6 位数字字符串，收到: {raw_code!r}")
+        normalized.append(code)
+    return normalized
+
+
 # ── 核心类 ──────────────────────────────────────────────
 
 class DailyBrief:
@@ -146,13 +161,121 @@ class DailyBrief:
         self.regime_detector = RegimeDetector(db)
         self.registry = FactorRegistry()
 
+    @staticmethod
+    def _no_data_factor_status(factor_name: str) -> dict:
+        """Return the explicit status used when no finite IC can be calculated."""
+        return {
+            "factor_name": factor_name,
+            "latest_ic": np.nan,
+            "ic_avg": np.nan,
+            "icir": np.nan,
+            "win_rate": np.nan,
+            "trend": "unknown",
+            "status": "no_data",
+        }
+
+    def _current_factor_status(self, factor_name: str, window: int = 20) -> dict:
+        """Calculate the brief's status fields without empty-slice means.
+
+        ``ICTracker.current_status`` also calculates an unused profit/loss ratio;
+        a one-sided IC window makes that metric take the mean of an empty slice.
+        The brief only needs IC, ICIR, win rate, trend, and status, so calculate
+        those same fields here after checking the aligned samples are finite.
+        """
+        end = datetime.now()
+        start = end - timedelta(days=window * 3)
+        conn = self.db._get_conn()
+        try:
+            trade_dates = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT trade_date FROM factor_values "
+                    "WHERE factor_name = ? AND trade_date >= ? AND trade_date <= ? "
+                    "ORDER BY trade_date",
+                    (factor_name, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+        ic_values: list[float] = []
+        for trade_date in trade_dates:
+            factor_values = self.ic_tracker._get_factor_values(factor_name, trade_date)
+            forward_returns = self.ic_tracker._get_forward_returns(trade_date, 1)
+            common = factor_values.index.intersection(forward_returns.index)
+            if len(common) < 5:
+                ic_values.append(np.nan)
+                continue
+
+            aligned = pd.DataFrame({
+                "factor": pd.to_numeric(factor_values.loc[common], errors="coerce"),
+                "return": pd.to_numeric(forward_returns.loc[common], errors="coerce"),
+            }).replace([np.inf, -np.inf], np.nan).dropna()
+            if (
+                len(aligned) < 5
+                or aligned["factor"].nunique() < 2
+                or aligned["return"].nunique() < 2
+            ):
+                ic_values.append(np.nan)
+                continue
+
+            ic_values.append(self.ic_tracker._compute_spearman_ic(
+                aligned["factor"], aligned["return"]
+            ))
+
+        if not ic_values:
+            return self._no_data_factor_status(factor_name)
+
+        ic_series = pd.Series(ic_values, dtype=float).replace([np.inf, -np.inf], np.nan)
+        window_values = ic_series.tail(window)
+        if window_values.empty or not np.isfinite(window_values).all():
+            return self._no_data_factor_status(factor_name)
+
+        latest_value = ic_series.iloc[-1]
+        latest_ic = float(latest_value) if np.isfinite(latest_value) else np.nan
+        ic_avg = float(window_values.mean())
+        ic_std = float(window_values.std())
+        icir = ic_avg / ic_std if np.isfinite(ic_std) and ic_std != 0 else np.nan
+        win_rate = float((window_values > 0).sum() / len(window_values))
+
+        recent_ics = ic_series.dropna().tail(5).to_numpy()
+        if len(recent_ics) >= 3:
+            slope = np.polyfit(range(len(recent_ics)), recent_ics, 1)[0]
+            if slope > 0.01:
+                trend = "improving"
+            elif slope < -0.01:
+                trend = "declining"
+            else:
+                trend = "stable"
+        else:
+            trend = "unknown"
+
+        if abs(ic_avg) < 0.02:
+            status = "dead"
+        elif ic_avg > 0.03 and win_rate > 0.5:
+            status = "healthy"
+        elif ic_avg > 0.02:
+            status = "weak"
+        else:
+            status = "negative"
+
+        return {
+            "factor_name": factor_name,
+            "latest_ic": latest_ic,
+            "ic_avg": ic_avg,
+            "icir": icir,
+            "win_rate": win_rate,
+            "trend": trend,
+            "status": status,
+        }
+
     # ================================================================
     # 交付物一：市场温度计
     # ================================================================
 
     def build_thermometer(self, as_of: datetime, report_date: str = "") -> MarketThermometer:
         """构建市场温度计。
-        
+
         Args:
             as_of: 时间隔离点（必须大于数据 snapshot_time）
             report_date: 报告目标交易日（默认取 as_of 前一天）
@@ -174,9 +297,15 @@ class DailyBrief:
                                   where="trade_date = ?", params=(report_date,))
         if not market_df.empty:
             row = market_df.iloc[-1]
-            thermo.zt_count = int(row.get("zt_count", 0))
-            thermo.dt_count = int(row.get("dt_count", 0))
-            thermo.highest_board = int(row.get("highest_board", 0))
+            market_values = pd.to_numeric(
+                row.reindex(["zt_count", "dt_count", "highest_board"]),
+                errors="coerce",
+            )
+            if np.isfinite(market_values).all():
+                thermo.zt_count = int(market_values["zt_count"])
+                thermo.dt_count = int(market_values["dt_count"])
+                thermo.highest_board = int(market_values["highest_board"])
+                thermo.data_sufficient = True
 
         # 炸板数
         zb_df = self.db.query("zb_pool", as_of,
@@ -184,14 +313,20 @@ class DailyBrief:
         thermo.zb_count = len(zb_df) if not zb_df.empty else 0
 
         # 3. 情绪级别判定
-        thermo.emotion_level = self._classify_emotion(thermo)
-        thermo.suggested_position = EMOTION_POSITION.get(thermo.emotion_level, 0.3)
+        if thermo.data_sufficient:
+            thermo.emotion_level = self._classify_emotion(thermo)
+            thermo.suggested_position = EMOTION_POSITION.get(thermo.emotion_level, 0.3)
+        else:
+            thermo.regime_cn = "不可判断"
+            thermo.regime_note = "市场情绪数据不足，无法判断市场状态与建议仓位。"
+            thermo.emotion_level = "未知"
+            thermo.suggested_position = 0.0
 
         # 4. 有效因子列表
         factor_names = self.registry.list_factors()
         active = []
         for name in factor_names:
-            status = self.ic_tracker.current_status(name, window=20)
+            status = self._current_factor_status(name, window=20)
             if status["status"] not in ("no_data",):
                 ic = status.get("ic_avg", 0)
                 if np.isnan(ic):
@@ -312,15 +447,23 @@ class DailyBrief:
                     sufficient_data = False
                     break
 
-                # Use the most recent IC values; compute mean.
-                ic_series = ic_df["ic_value"] if "ic_value" in ic_df.columns else pd.Series(dtype=float)
-                if len(ic_series) < days_threshold:
+                # Use the most recent finite IC values; sparse windows cannot
+                # support a dynamic weight.
+                ic_series = (
+                    pd.to_numeric(ic_df["ic_value"], errors="coerce")
+                    if "ic_value" in ic_df.columns
+                    else pd.Series(dtype=float)
+                )
+                recent_ic = (
+                    ic_series.tail(days_threshold)
+                    .replace([np.inf, -np.inf], np.nan)
+                    .dropna()
+                )
+                if len(recent_ic) < days_threshold:
                     sufficient_data = False
                     break
 
-                ic_mean = float(ic_series.tail(days_threshold).mean())
-                if np.isnan(ic_mean):
-                    ic_mean = 0.0
+                ic_mean = float(recent_ic.mean())
 
                 # Negative IC in current regime → disable factor.
                 if ic_mean < -0.01:
@@ -366,11 +509,11 @@ class DailyBrief:
         factor_data = {}  # name -> {ic, weight, values: pd.Series}
 
         for name in factor_names:
-            status = self.ic_tracker.current_status(name, window=20)
+            status = self._current_factor_status(name, window=20)
 
-            # IC 无数据时用等权（默认 IC=0.05）
+            # 无有限 IC 时不可评分，避免用虚构的默认值生成候选。
             if status["status"] == "no_data":
-                ic = 0.05
+                continue
             elif status["status"] in ("dead", "negative"):
                 continue
             else:
@@ -387,7 +530,11 @@ class DailyBrief:
                 continue
 
             fv_df = fv_df.sort_values("snapshot_time").groupby("stock_code").last().reset_index()
-            values = fv_df.set_index("stock_code")["factor_value"]
+            values = pd.to_numeric(
+                fv_df.set_index("stock_code")["factor_value"], errors="coerce"
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+            if values.empty:
+                continue
 
             weight = abs(ic)
             if name in rw:
@@ -526,7 +673,7 @@ class DailyBrief:
             from datetime import timedelta
             report_date = (as_of - timedelta(days=1)).strftime("%Y-%m-%d")
         alerts = []
-        for code in holdings:
+        for code in normalize_holdings(list(holdings)):
             alert = self._check_holding(code, as_of, report_date)
             if alert:
                 alerts.append(alert)
@@ -623,7 +770,10 @@ class DailyBrief:
                             )
 
         # 5. 综合建议
-        if alert.santai_risk_score >= 2:
+        has_holding_data = not price_df.empty or not fund_df.empty or not concept_df.empty
+        if not has_holding_data:
+            alert.advice = "数据不足，持仓风险不可判断"
+        elif alert.santai_risk_score >= 2:
             alert.advice = "三班组特征明显，明日竞价观察，高开 3% 以上考虑减仓"
         elif alert.danger_signals:
             alert.advice = "存在风险信号，注意盘面变化"
@@ -649,11 +799,15 @@ class DailyBrief:
         lines.append("│" + " " * w + "│")
 
         # 情绪 + 仓位
-        emotion_icon = {"极弱": "❄️", "弱": "☁️", "中性": "⛅", "偏强": "⚡", "强": "🔥"}
-        icon = emotion_icon.get(thermo.emotion_level, "")
-        emotion_line = f"  情绪级别：{icon} {thermo.emotion_level}（{'可操作' if thermo.suggested_position > 0.3 else '建议休息'}）"
+        if thermo.data_sufficient:
+            emotion_icon = {"极弱": "❄️", "弱": "☁️", "中性": "⛅", "偏强": "⚡", "强": "🔥"}
+            icon = emotion_icon.get(thermo.emotion_level, "")
+            emotion_line = f"  情绪级别：{icon} {thermo.emotion_level}（市场情绪参考）"
+            pos_line = f"  市场情绪参考仓位上限：{thermo.suggested_position:.0%}（非交易建议）"
+        else:
+            emotion_line = "  情绪级别：数据不足/不可判断"
+            pos_line = "  市场情绪参考仓位上限：数据不足/不可判断（非交易建议）"
         lines.append(f"│{emotion_line:<{w}}│")
-        pos_line = f"  建议仓位：{thermo.suggested_position:.0%}"
         lines.append(f"│{pos_line:<{w}}│")
         lines.append("│" + " " * w + "│")
 
@@ -661,11 +815,16 @@ class DailyBrief:
         lines.append(f"│  当前有效因子（按 |IC| 排序）：{' ' * (w - 22)}│")
 
         status_icon = {"healthy": "✅", "weak": "⚠️ ", "dead": "❌", "negative": "❌", "no_data": "⬜"}
-        trend_arrow = {"improving": "↑", "declining": "↓", "stable": "→", "unknown": "?"}
+        trend_arrow = {
+            "improving": "↑",
+            "declining": "↓",
+            "stable": "→",
+            "unknown": "未知/数据不足",
+        }
 
         for f in thermo.active_factors[:8]:
             si = status_icon.get(f["status"], "⬜")
-            ta = trend_arrow.get(f["trend"], "?")
+            ta = trend_arrow.get(f["trend"], "未知/数据不足")
             ic_str = f"{f['ic']:.2f}" if not np.isnan(f["ic"]) else "N/A"
             line = f"  {si} {f['name']:<22} IC={ic_str:>6}  趋势{ta}"
             lines.append(f"│{line:<{w}}│")
@@ -784,6 +943,7 @@ class DailyBrief:
         parts.append(self.format_thermometer(thermo))
 
         # 如果情绪极弱，跳过候选卡片
+        candidates = []
         if thermo.emotion_level in ("极弱",) and thermo.suggested_position == 0:
             parts.append("\n⚠ 情绪极弱，建议休息，不生成候选卡片。")
         else:
@@ -796,6 +956,9 @@ class DailyBrief:
                     parts.append(self.format_candidate_card(card))
             else:
                 parts.append("\n（无有效候选 — 因子数据不足）")
+
+        if not candidates:
+            parts.append("\n当前可执行新增仓位：0%（本简报无有效候选）")
 
         # 交付物三：持仓风险预警
         if holdings:
@@ -819,8 +982,8 @@ class DailyBrief:
     def _strategy_scan(self, as_of: datetime, report_date: str) -> str:
         """用预置策略扫描当日信号。"""
         try:
-            from src.strategy.loader import load_strategies
             from src.strategy.backtest_engine import BacktestEngine
+            from src.strategy.loader import load_strategies
         except ImportError:
             return ""
 

@@ -3,7 +3,7 @@
 用法:
   python -m cli report --date 2026-04-17
   python -m cli report --brief                  # 盘后决策简报
-  python -m cli report --brief --holdings 600xxx,000xxx
+  python -m cli report --brief --holdings '600000,000001'
   python -m cli report                          # 默认日报
 """
 
@@ -12,7 +12,73 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from src.data.storage import Storage
+_PLAIN_TEXT_REPLACEMENTS = {
+    "❄️": "[极弱]",
+    "☁️": "[弱]",
+    "⛅": "[中性]",
+    "⚡": "[偏强]",
+    "🔥": "[强]",
+    "✅": "[正常]",
+    "⚠️": "[注意]",
+    "❌": "[不可用]",
+    "⬜": "[无数据]",
+    "🟢": "[买入]",
+    "🟡": "[观望]",
+    "🔴": "[回避]",
+    "⚪": "[未分类]",
+    "┌": "+",
+    "┐": "+",
+    "└": "+",
+    "┘": "+",
+    "├": "+",
+    "┤": "+",
+    "─": "-",
+    "│": "|",
+    "↑": "^",
+    "↓": "v",
+    "→": "->",
+    "■": "#",
+    "□": ".",
+    "⚠": "[注意]",
+    "▸": ">",
+}
+
+
+def _parse_holdings(value: str) -> list[str]:
+    """Parse comma-separated holdings without loading data/science dependencies."""
+    holdings = []
+    for raw_code in value.split(","):
+        code = raw_code.strip()
+        if len(code) != 6 or not code.isascii() or not code.isdigit():
+            raise argparse.ArgumentTypeError(
+                f"持仓代码必须是 6 位数字字符串，收到: {raw_code!r}"
+            )
+        holdings.append(code)
+    return holdings
+
+
+def _terminal_safe_text(text: str, encoding: str | None = None) -> str:
+    """Return rich text when supported, otherwise a deterministic plain-text form."""
+    output_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(output_encoding)
+        return text
+    except UnicodeEncodeError:
+        plain = text
+        for rich, fallback in _PLAIN_TEXT_REPLACEMENTS.items():
+            plain = plain.replace(rich, fallback)
+
+        # Database-provided names may still contain a character outside the
+        # console code page. Escape only those individual characters so the
+        # report remains printable and the surrounding Chinese stays readable.
+        safe_parts = []
+        for char in plain:
+            try:
+                char.encode(output_encoding)
+                safe_parts.append(char)
+            except UnicodeEncodeError:
+                safe_parts.append(f"\\u{ord(char):04X}")
+        return "".join(safe_parts)
 
 
 def main():
@@ -20,9 +86,14 @@ def main():
     parser.add_argument("--date", type=str, default=None, help="报告日期 YYYY-MM-DD，默认今天")
     parser.add_argument("--db", type=str, default="data/alpha_miner.db", help="数据库路径")
     parser.add_argument("--log", type=str, default="data/mining_log.jsonl", help="挖掘日志路径")
-    parser.add_argument("--save", type=str, default=None, help="保存路径 (默认 reports/YYYY-MM-DD.txt)")
+    parser.add_argument("--save", type=str, default=None, help="保存 UTF-8 文本到指定路径（默认不保存）")
     parser.add_argument("--brief", action="store_true", help="盘后决策简报模式（温度计+候选卡+持仓预警）")
-    parser.add_argument("--holdings", type=str, default=None, help="持仓代码，逗号分隔（如 600xxx,000xxx）")
+    parser.add_argument(
+        "--holdings",
+        type=_parse_holdings,
+        default=None,
+        help="6 位持仓代码，逗号分隔（PowerShell 示例: '600000,000001'）",
+    )
     parser.add_argument("--top", type=int, default=10, help="候选卡片数量（默认10）")
     args = parser.parse_args()
 
@@ -37,27 +108,28 @@ def main():
         report_date = datetime.now().strftime("%Y-%m-%d")
         as_of = datetime.now()
 
+    from src.data.storage import Storage
+
     db = Storage(args.db)
 
     if args.brief:
         # 盘后决策简报模式
         from src.drift.daily_brief import DailyBrief
 
-        print(f"[INFO] 生成盘后决策简报: {report_date}")
         brief = DailyBrief(db)
 
-        holdings = []
-        if args.holdings:
-            holdings = [h.strip() for h in args.holdings.split(",") if h.strip()]
+        holdings = args.holdings or []
+
+        print(f"[INFO] 生成盘后决策简报: {report_date}")
 
         text = brief.generate_full_report(as_of, holdings=holdings or None, top_n=args.top, report_date=report_date)
-        print(text)
+        print(_terminal_safe_text(text))
 
-        # 保存
-        save_path = args.save or f"reports/{report_date}_brief.txt"
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(save_path).write_text(text, encoding="utf-8")
-        print(f"\n[INFO] 简报已保存: {save_path}")
+        if args.save:
+            save_path = Path(args.save)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(text, encoding="utf-8")
+            print(_terminal_safe_text(f"\n[INFO] 简报已保存: {save_path}"))
     else:
         # 传统日报模式
         from src.drift.daily_report import DailyReport
@@ -67,13 +139,13 @@ def main():
         text = report.generate(as_of, report_date=report_date)
 
         # 终端输出
-        print(text)
+        print(_terminal_safe_text(text))
 
-        # 保存到文件
-        save_path = args.save or f"reports/{report_date}.txt"
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(save_path).write_text(text, encoding="utf-8")
-        print(f"\n[INFO] 日报已保存: {save_path}")
+        if args.save:
+            save_path = Path(args.save)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(text, encoding="utf-8")
+            print(_terminal_safe_text(f"\n[INFO] 日报已保存: {save_path}"))
 
 
 if __name__ == "__main__":
@@ -97,6 +169,8 @@ def main_script():
     else:
         report_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         as_of = datetime.now()
+
+    from src.data.storage import Storage
 
     db = Storage(args.db)
     db.init_db()
@@ -138,7 +212,7 @@ def main_script():
 
     if args.save:
         engine.save_script(script)
-        print(f"\n[INFO] 剧本已保存到数据库")
+        print("\n[INFO] 剧本已保存到数据库")
 
 
 def main_replay():
@@ -150,6 +224,8 @@ def main_replay():
     parser.add_argument("--stats", action="store_true", help="显示准确率统计")
     parser.add_argument("--llm", action="store_true", help="启用 LLM 生成（默认纯规则）")
     args = parser.parse_args()
+
+    from src.data.storage import Storage
 
     db = Storage(args.db)
     db.init_db()
@@ -201,8 +277,8 @@ def main_replay():
             print(f"  [{ev['type']}] {ev['detail']}")
     if result.lessons:
         print("\n[教训]")
-        for l in result.lessons:
-            print(f"  - {l}")
+        for lesson in result.lessons:
+            print(f"  - {lesson}")
     if result.adjustment_suggestions:
         print("\n[调整建议]")
         for s in result.adjustment_suggestions:
@@ -210,4 +286,4 @@ def main_replay():
 
     if args.save:
         engine.save_replay(result)
-        print(f"\n[INFO] 复盘已保存到数据库")
+        print("\n[INFO] 复盘已保存到数据库")

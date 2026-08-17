@@ -143,10 +143,18 @@ uv run python -m cli mine evolve --generations 5 --population 12 --workers 4
 
 ```powershell
 uv run python -m cli report --brief
-uv run python -m cli report --brief --holdings 600000,000001
+uv run python -m cli report --brief --holdings '600000,000001'
 ```
 
-当前通用因子也尚未产生通过完整准入的新因子，因此这部分只作为市场背景和风险辅助，不作为自动买卖指令。
+PowerShell 中必须给整个持仓列表加引号，否则带前导零的代码会在进入程序前被解释为数字；程序会明确拒绝这种无效输入，不会静默改写证券代码。
+
+以上命令默认只输出到终端，不创建报告文件。需要留存时显式指定 UTF-8 文件路径，例如：
+
+```powershell
+uv run python -m cli report --brief --save reports/2026-08-17_brief.txt
+```
+
+简报中的“市场情绪参考仓位上限”只描述市场环境，不是可执行仓位或交易建议。正式操作仍以 `zt status` / `zt scan` 的准入状态和操作卡为闸门；本简报无有效候选时，当前可执行新增仓位为 0%。当前通用因子也尚未产生通过完整准入的新因子，因此这部分只作为市场背景和风险辅助，不作为自动买卖指令。
 
 ## 三条硬规则
 

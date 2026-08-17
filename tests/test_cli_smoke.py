@@ -8,12 +8,16 @@ import sys
 def run_cli(*args, timeout=20):
     """运行 CLI 命令，返回 (exit_code, stdout, stderr)。"""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = os.environ.copy()
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["OMP_NUM_THREADS"] = "1"
     result = subprocess.run(
         [sys.executable, "-m", "cli"] + list(args),
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=project_root,
+        env=env,
     )
     return result.returncode, result.stdout, result.stderr
 
@@ -37,6 +41,7 @@ class TestCLISmoke:
         """report --help。"""
         code, out, err = run_cli("report", "--help")
         assert code == 0, f"report --help 失败:\n{err}"
+        assert "默认不保存" in out
 
     def test_mine_help(self):
         """mine --help。"""
