@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "round",
+    "summary",
+    "changed_files",
+    "test_commands",
+    "evidence",
+    "risks"
+  ],
+  "properties": {
+    "round": {"type": "integer"},
+    "summary": {"type": "string"},
+    "changed_files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "test_commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "exit_code", "evidence"],
+        "properties": {
+          "command": {"type": "string"},
+          "exit_code": {"type": "integer"},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "risks": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

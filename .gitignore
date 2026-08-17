@@ -23,3 +23,6 @@ config/remote.local.ps1
 .claude/
 # 仅忽略仓库根的旧散落脚本目录，勿误伤 src/factors/
 /factors/
+
+# Minimal brain runtime state and redacted logs
+/.brain/

@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "round",
+    "decision",
+    "failed_acceptance_items",
+    "evidence",
+    "revision_scope"
+  ],
+  "properties": {
+    "round": {"type": "integer"},
+    "decision": {
+      "type": "string",
+      "enum": ["accepted", "changes_requested"]
+    },
+    "failed_acceptance_items": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "revision_scope": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}
