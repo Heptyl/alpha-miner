@@ -41,7 +41,6 @@ class TestInitDb:
 class TestSchemaMigration:
     def test_news_table_has_new_columns(self, tmp_db):
         """init_db 后 news 表应有 news_type 和 classify_confidence 列。"""
-        import sqlite3
         conn = tmp_db._get_conn()
         try:
             cols = [row["name"] for row in conn.execute("PRAGMA table_info(news)")]

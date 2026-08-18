@@ -4,7 +4,7 @@
 
 ## 一句话结论
 
-产品骨架已收敛为免费数据 → PIT 离线实验 → PAPER 玩法卡 → `python -m cli` 只读展示；B1/B2、PIT、H1、精简与 USER/真相源收口现已随 `main` 完成 code-only 推送。当前没有已证明统计优势。S3-B2b 全仓离线 pytest 已通过，仍有全树 Ruff 存量问题；运行环境尚未部署本次代码。
+产品骨架已收敛为免费数据 → PIT 离线实验 → PAPER 玩法卡 → `python -m cli` 只读展示；market/USER 投影与独立 append-only 研究账本采用物理隔离。该 B 方案仍未部署或接入正式引擎，因此当前没有正式发现或已证明统计优势。
 
 ## Git 与发布状态
 
@@ -12,7 +12,7 @@
 |---|---|
 | 本地 HEAD | 本地 `main` 与 `origin/main` 一致；精确哈希用 `git rev-parse HEAD` 与 `git rev-parse origin/main` 核验。 |
 | 远端基线 | 本次 code-only 提交与此前 8 个本地提交均已随 `main` 推送；已安装的 `AlphaMiner-LimitUpHistory` 计划任务 runner 仍运行旧部署基线 `a182e67`。 |
-| 工作树 | S4-C、S3-B2a 与 S3-B2b 已合并为一个 code-only 冻结提交；提交并推送后 worktree 与 index clean。未 deploy 或同步 X 盘/服务器。 |
+| 代码冻结 | 本批代码冻结状态以 `git log`、`git status`、HEAD 与 `origin/main` 实时核验；尚未 deploy、同步 X 盘/服务器或触碰真实数据库。 |
 | 真实运行库 | 已有 1 张 `three_to_four_reseal / 2026-08-17` 卡，状态 `PLANNED / NOT_ADMITTED`；本轮文档与精简工作未写数据库。 |
 
 ## 本地冻结批次
@@ -21,7 +21,7 @@
 |---|---|---|
 | B1 竞价/开盘快照 | 9:25 与 09:31 免费前向采集基础已本地冻结，候选按精确前一交易日冻结。 | 代码已随 `main` 推送；未安装新任务或部署。 |
 | B2 五分钟 RAW | 两表式候选 checkpoint 与 5 分钟历史补采已本地冻结。 | `RETRO_BACKFILL` 不能冒充当时可见；未形成玩法或胜率；代码已推送但未部署。 |
-| PIT 研究诚信 | `PointInTimeView` 与通用/涨停 development-only 语义已本地冻结；旧引擎不得宣称 accepted。 | 一次性 holdout 审计账本尚未实现，只能称 `DEVELOPMENT_CANDIDATE`；代码已推送但未部署。 |
+| PIT 研究诚信 | `PointInTimeView` 与通用/涨停 development-only 语义已推送；本批新增独立追加式候选/血统/证据原语，并绑定不可变 market hash 快照。 | 原语尚未接 EvolutionEngine/Backtester/LimitUp，也未实现正式 holdout evaluator，只能称 `DEVELOPMENT_CANDIDATE`。 |
 | H1 题材新进入者 | `theme_new_entrant_diffusion_v1` 的前向 PAPER 构建与审计约束已本地冻结。 | development 仅 12 个独立收益日；D+3 OPEN 成本后均值 `+0.5530%`，95% CI `[-0.9914%, 2.0835%]`，Holm 不显著，不能称发现；代码已推送但未部署。 |
 | S2-A / S3-B1 精简 | 10 个零引用旧旁路删除，共 3031 LOC；PM 已接受删除安全并已本地冻结。 | 已随 `main` 推送；删除安全不等于全树静态检查全绿。 |
 | S2-B USER 收口 | 默认 `python -m cli` 只读 play；帮助只公开 play、`zt status`、持仓 report 三条路径；15 项定向测试通过，真实 PowerShell 中文捕获通过，数据库 SHA 前后不变。 | 已随 `main` 推送但未部署；USER 角色日常只使用默认入口。 |
@@ -31,7 +31,7 @@
 
 ## 最近联合回归
 
-S3-B2b 在当前共享脏工作树仅执行一次 `uv run pytest -q -m "not live"`：exit 0，`574 passed / 7 deselected / 5 warnings`；pytest 报告耗时 445.77 秒，外层计时 453.90 秒。此前本批定向组合为 `133 passed / 1 warning`，耗时 105.13 秒。
+当前 B 方案工作树仅执行一次 `uv run pytest -q -m "not live"`：exit 0，`614 passed / 7 deselected / 5 warnings`；pytest 报告耗时 618.12 秒，外层计时 631 秒。本批账本、激活、Storage、PIT 与架构定向组合为 `68 passed`，相关 Ruff 通过。
 
 - 5 个 warnings：SnowNLP 的 `codecs.open()` 弃用警告 2 个；`src/drift/ic_tracker.py` 的 `Mean of empty slice` 3 个。
 - 全树 Ruff 仍为 exit 1、289 个既有问题；其中 248 个可自动修复，另有 23 个可选 unsafe 修复，本轮未修改。
@@ -39,5 +39,5 @@ S3-B2b 在当前共享脏工作树仅执行一次 `uv run pytest -q -m "not live
 
 ## 下一步
 
-1. 请负责人核对冻结提交的 25 路径、`574 passed / 7 deselected` 回归和 `origin/main == HEAD`；本次仅完成代码推送。
-2. 如需同步 X 盘、服务器、计划任务或数据库，必须另行授权并与本次 code-only 推送分离；持仓 report 与底层研究正确性组件继续保留。
+1. 独立账本尚未接入 EvolutionEngine/Backtester/LimitUp；接线与正式 holdout evaluator 必须另立任务，当前不得称正式发现。
+2. 冻结状态以 HEAD/origin 核验；部署、同步 X 盘/服务器、修改计划任务或数据库仍需独立执行，本批没有触碰真实运行库。

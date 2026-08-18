@@ -24,17 +24,19 @@ Windows 免费前向采集并发布带时间戳数据
 | 原则 | 不可变含义 |
 |---|---|
 | 一个引擎 | `EvolutionEngine` 是唯一离线研究编排器；因子、策略和涨停只是同一引擎内的实验类型。 |
-| 一个数据库 | 行情、带时间戳快照、分钟序列、假说、实验、玩法卡和反馈进入同一 SQLite。 |
+| 一个 USER 数据契约 | USER 只读 market SQLite 中的行情与 `play_cards` 投影；研究证据写入独立、追加式 `research_ledger.db`。过去“一个数据库”的物理单库实现已退役。 |
 | 一个 USER 入口 | 只读预计算玩法卡，目标 p95 `<=5秒`；不得触发采集、临时回测、网页搜索、LLM 或进化。 |
 | 一种玩法卡 | 负责人只看玩法、行为逻辑、候选、模拟动作、放弃、卖出、历史证据和 PAPER/准入状态。 |
 
 Windows 负责免费数据的前向采集与发布；服务器负责离线回测和慢实验。慢任务永远不阻塞 USER。
 
-## 数据运行与发布
+## 数据运行、发布与研究证据
 
-- 服务器本地 SQLite/WAL 是离线计算的权威运行库；不得让运行进程直接读写 X 盘 SQLite。
+- 服务器本地 market SQLite/WAL 是行情与 USER 投影运行库；可替换但只向 USER 提供只读契约。独立 `research_ledger.db` 只追加候选、血统与证据，market 发布/激活绝不迁移或覆盖账本。
 - X 盘只承载代码同步和只读一致性快照，不承担运行库或并发写入。
-- Windows 采集结果发布时必须用 SQLite backup API 生成一致性副本；服务器先执行 `PRAGMA quick_check`，再原子替换运行库，并保留 `alpha_miner.previous.db` 供回滚。
+- Windows 采集结果发布时必须用 SQLite backup API 生成一致性副本；canonical manifest 的 SHA256 必须等于 active market DB 实际字节哈希。服务器先执行 `PRAGMA quick_check`，再以可恢复状态机替换运行库，并保留 `alpha_miner.previous.db` 供回滚。
+- 研究开始前，账本只从固定 active market DB 与 canonical manifest 绑定数据，并复制为 SHA256 命名的不可变研究快照；候选只能引用该账本实例已绑定的快照，不能由调用者注入路径或哈希。
+- Evolution 不得直接写 active market 的 `play_cards`；正式获准证据只能由单一发布者投影进下一版 canonical market 快照，避免日更替换覆盖研究结果。
 - 对外快照同样由 backup API 产生；USER 只读预计算结果，采集、发布、回测和进化等慢任务不得进入 USER 请求路径。
 
 ## 大模型与程序分工
