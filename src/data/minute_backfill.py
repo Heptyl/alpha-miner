@@ -81,6 +81,42 @@ class MinuteStatus:
 Fetcher = Callable[[str], list[MinuteBar]]
 
 
+@dataclass
+class MinuteRequestState:
+    requests_started: int = 0
+    attempts: int = 0
+
+
+def fetch_minute_bars_with_retry(
+    stock_code: str,
+    *,
+    fetcher: Fetcher = fetch_raw_5m,
+    sleeper: Callable[[float], None] = time.sleep,
+    delay_seconds: Callable[[], float] = lambda: random.uniform(1.5, 2.5),
+    state: MinuteRequestState | None = None,
+) -> list[MinuteBar]:
+    """Fetch one RAW 5m series under the shared bounded retry/delay policy."""
+    state = state or MinuteRequestState()
+    state.attempts = 0
+    while True:
+        if state.requests_started:
+            delay = float(delay_seconds())
+            if delay < 0:
+                raise MinuteBackfillError("请求间隔不能为负数")
+            sleeper(delay)
+        state.requests_started += 1
+        state.attempts += 1
+        try:
+            bars = fetcher(stock_code)
+            if not bars:
+                raise SinaMinuteError("Sina 5分钟数据为空")
+            _validate_fetched_bars(stock_code, bars)
+            return bars
+        except SinaMinuteError as exc:
+            if exc.circuit_breaker or not exc.retryable or state.attempts > MAX_RETRIES:
+                raise
+
+
 def freeze_latest_minute_universe(
     storage: MinuteStorage,
     *,
@@ -212,31 +248,16 @@ def backfill_latest_minutes(
     new_conflicts = 0
     consecutive_source_errors = 0
     circuit_reason: str | None = None
-    request_count = 0
+    request_state = MinuteRequestState()
 
     for code in pending_codes:
         request_attempts = 0
         try:
-            while True:
-                if request_count:
-                    delay = float(delay_seconds())
-                    if delay < 0:
-                        raise MinuteBackfillError("请求间隔不能为负数")
-                    sleeper(delay)
-                request_count += 1
-                request_attempts += 1
-                try:
-                    bars = fetcher(code)
-                    if not bars:
-                        raise SinaMinuteError("Sina 5分钟数据为空")
-                    _validate_fetched_bars(code, bars)
-                    break
-                except SinaMinuteError as exc:
-                    if exc.circuit_breaker:
-                        raise
-                    if exc.retryable and request_attempts <= MAX_RETRIES:
-                        continue
-                    raise
+            bars = fetch_minute_bars_with_retry(
+                code, fetcher=fetcher, sleeper=sleeper, delay_seconds=delay_seconds,
+                state=request_state,
+            )
+            request_attempts = request_state.attempts
 
             fetched_at = _as_shanghai_time(now_fn()).isoformat(timespec="seconds")
             save_minute_bars(
@@ -250,6 +271,7 @@ def backfill_latest_minutes(
             successes += 1
             consecutive_source_errors = 0
         except SinaMinuteError as exc:
+            request_attempts = request_state.attempts
             failures += 1
             consecutive_source_errors += 1
             _mark_item_error(
@@ -320,15 +342,6 @@ def save_minute_bars(
     request_attempts: int = 1,
 ) -> None:
     """Atomically persist immutable bars and advance exactly one item checkpoint."""
-    if not bars:
-        raise MinuteBackfillError("禁止保存空的5分钟数据")
-    _validate_fetched_bars(stock_code, bars)
-    fetched_time = _parse_shanghai_time(fetched_at, "first_fetched_at")
-    for bar in bars:
-        if _parse_shanghai_time(bar.bar_time, "bar_time") > fetched_time:
-            raise MinuteBackfillError(
-                f"{stock_code}包含晚于first_fetched_at的未来bar，禁止写入"
-            )
     connection = _write_connection(db_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -341,59 +354,9 @@ def save_minute_bars(
         ).fetchone()
         if item is None:
             raise MinuteBackfillError("补采股票不在冻结候选中")
-
-        prepared = [(bar, _bar_payload_hash(bar)) for bar in bars]
-        for bar, payload_hash in prepared:
-            existing = connection.execute(
-                """
-                SELECT payload_hash FROM minute_bars_5m
-                WHERE source = ? AND stock_code = ? AND period = ?
-                  AND adjust = ? AND bar_time = ?
-                """,
-                (bar.source, stock_code, bar.period, bar.adjust, bar.bar_time),
-            ).fetchone()
-            if existing is not None and str(existing["payload_hash"]) != payload_hash:
-                raise MinuteBarConflictError(
-                    f"{stock_code} {bar.bar_time}同键异值，禁止覆盖"
-                )
-        for bar, payload_hash in prepared:
-            connection.execute(
-                """
-                INSERT INTO minute_bars_5m (
-                    source, stock_code, period, adjust, bar_time,
-                    open, high, low, close, volume, amount,
-                    first_fetched_at, payload_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source, stock_code, period, adjust, bar_time) DO NOTHING
-                """,
-                (
-                    bar.source,
-                    stock_code,
-                    bar.period,
-                    bar.adjust,
-                    bar.bar_time,
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
-                    bar.amount,
-                    fetched_at,
-                    payload_hash,
-                ),
-            )
-        counts = connection.execute(
-            """
-            SELECT substr(bar_time, 1, 10) AS trade_date, COUNT(*) AS n
-            FROM minute_bars_5m
-            WHERE source = ? AND stock_code = ? AND period = ? AND adjust = ?
-            GROUP BY substr(bar_time, 1, 10)
-            """,
-            (SOURCE_NAME, stock_code, PERIOD, ADJUST),
-        ).fetchall()
-        bars_count = sum(int(row["n"]) for row in counts)
-        complete_days = sum(int(row["n"]) == 48 for row in counts)
-        partial_days = sum(int(row["n"]) != 48 for row in counts)
+        bars_count, complete_days, partial_days = persist_raw_5m_bars(
+            db_path, stock_code, bars, fetched_at=fetched_at, _connection=connection,
+        )
         connection.execute(
             """
             UPDATE minute_capture_items
@@ -418,6 +381,64 @@ def save_minute_bars(
         raise
     finally:
         connection.close()
+
+
+def persist_raw_5m_bars(
+    db_path: str,
+    stock_code: str,
+    bars: list[MinuteBar],
+    *,
+    fetched_at: str,
+    _connection: sqlite3.Connection | None = None,
+) -> tuple[int, int, int]:
+    """Persist immutable Sina RAW 5m bars, preserving first-visible time and conflicts."""
+    if not bars:
+        raise MinuteBackfillError("禁止保存空的5分钟数据")
+    _validate_fetched_bars(stock_code, bars)
+    fetched_time = _parse_shanghai_time(fetched_at, "first_fetched_at")
+    if any(_parse_shanghai_time(bar.bar_time, "bar_time") > fetched_time for bar in bars):
+        raise MinuteBackfillError(f"{stock_code}包含晚于first_fetched_at的未来bar，禁止写入")
+    connection, owns = (_connection or _write_connection(db_path)), _connection is None
+    try:
+        if owns:
+            connection.execute("BEGIN IMMEDIATE")
+        prepared = [(bar, _bar_payload_hash(bar)) for bar in bars]
+        for bar, payload_hash in prepared:
+            existing = connection.execute(
+                """SELECT payload_hash FROM minute_bars_5m
+                   WHERE source=? AND stock_code=? AND period=? AND adjust=? AND bar_time=?""",
+                (bar.source, stock_code, bar.period, bar.adjust, bar.bar_time),
+            ).fetchone()
+            if existing is not None and str(existing["payload_hash"]) != payload_hash:
+                raise MinuteBarConflictError(f"{stock_code} {bar.bar_time}同键异值，禁止覆盖")
+        connection.executemany(
+            """INSERT INTO minute_bars_5m
+               (source,stock_code,period,adjust,bar_time,open,high,low,close,volume,amount,
+                first_fetched_at,payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(source,stock_code,period,adjust,bar_time) DO NOTHING""",
+            [(bar.source, stock_code, bar.period, bar.adjust, bar.bar_time, bar.open, bar.high,
+              bar.low, bar.close, bar.volume, bar.amount, fetched_at, payload_hash)
+             for bar, payload_hash in prepared],
+        )
+        counts = connection.execute(
+            """SELECT substr(bar_time,1,10) AS trade_date, COUNT(*) AS n
+               FROM minute_bars_5m WHERE source=? AND stock_code=? AND period=? AND adjust=?
+               GROUP BY substr(bar_time,1,10)""",
+            (SOURCE_NAME, stock_code, PERIOD, ADJUST),
+        ).fetchall()
+        result = (sum(int(row["n"]) for row in counts),
+                  sum(int(row["n"]) == 48 for row in counts),
+                  sum(int(row["n"]) != 48 for row in counts))
+        if owns:
+            connection.commit()
+        return result
+    except Exception:
+        if owns:
+            connection.rollback()
+        raise
+    finally:
+        if owns:
+            connection.close()
 
 
 def load_minute_status(db_path: str | Path) -> MinuteStatus:

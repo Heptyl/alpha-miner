@@ -49,6 +49,9 @@ if __name__ == "__main__":
         sys.dont_write_bytecode = True
         from cli.play import main
         main()
+    elif sub == "watch":
+        from cli.watch import main
+        main()
     else:
         print(f"Unknown command: {sub}", file=sys.stderr)
         print("Run 'python -m cli --help' for USER commands.", file=sys.stderr)
