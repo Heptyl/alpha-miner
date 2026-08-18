@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -172,8 +173,8 @@ def test_cli_prints_complete_non_admitted_paper_without_modifying_database(tmp_p
         "历史开发指标：触发率7.23%｜胜率55.00%（分子/分母未记录）｜"
         "平均成本后收益1.2000%｜盈亏比1.7201｜最大回撤6.5666%",
         "证据结论：样本/holdout不足或未记录；仅作PAPER验证，未证明统计优势。",
-        "最近PAPER结果：尚无card lifecycle COMPLETED结果；"
-        "不会用历史开发样本冒充结算",
+            "最近FORWARD PAPER结果：首批计划尚未结算；"
+            "不会用历史development冒充结果",
     ):
         assert text in result.stdout
     assert result.stdout.count("触发：") == 1
@@ -187,6 +188,79 @@ def test_cli_prints_complete_non_admitted_paper_without_modifying_database(tmp_p
     assert "WATCH_ONLY" not in result.stdout
     assert len(_nonempty_lines(result.stdout)) <= 20
     assert elapsed < 5
+    assert _fingerprint(path) == before
+
+
+def test_attention_card_is_action_first_compact_and_read_only(tmp_path):
+    storage = _storage(tmp_path, "attention-output.db")
+    plan = {
+        "play_id": "attention_reacceleration_open_v1",
+        "play_name": "注意力再加速开盘",
+        "behavior_logic": "近期涨停记忆或行业扩散注意力出现正向再加速。",
+        "signal_trade_date": "2026-08-17",
+        "generated_at": "2026-08-17T16:30:00+08:00",
+        "trigger_rule": "2026-08-18具备09:25与09:31快照且gap在[-2%, +5%]",
+        "abandon_rule": "缺快照记INVALID；越界或无量记UNFILLED",
+        "exit_rule": "2026-08-20开盘卖出；成本20bp",
+        "admission_status": "NOT_ADMITTED",
+        "candidate_identity": [{"stock_code": "000003"}],
+    }
+    encoded = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    card = PlayCard(
+        play_id="attention_reacceleration_open_v1",
+        play_name="注意力再加速开盘",
+        behavior_logic="近期涨停记忆或行业扩散注意力出现正向再加速。",
+        signal_trade_date="2026-08-17",
+        candidates=[
+            {
+                "stock_code": "000003",
+                "stock_name": "扩散股",
+                "industry": "算力",
+                "state_domains": ["industry_diffusion_non_limit"],
+                "attention_slope": 0.3,
+                "paper_status": "PLANNED",
+                "selection_reason": "行业扩散且attention slope转正",
+                "lifecycle_events": [
+                    {"status": "PLANNED", "recorded_at": "D", "reason": "冻结"}
+                ],
+            }
+        ],
+        trigger_rule="2026-08-18具备09:25与09:31快照且gap在[-2%, +5%]",
+        abandon_rule="缺快照记INVALID；越界或无量记UNFILLED",
+        exit_rule="2026-08-20开盘卖出；成本20bp",
+        historical_evidence={
+            "forward_plan": plan,
+            "forward_plan_hash": hashlib.sha256(encoded.encode()).hexdigest(),
+            "planned_entry_date": "2026-08-18",
+            "planned_exit_date": "2026-08-20",
+            "total_cost_bps": 20,
+            "historical_development": {
+                "completed_signal_days": 3,
+                "holdout_status": "HOLDOUT_NOT_OPENED",
+            },
+        },
+        paper_status="PLANNED",
+        admission_status="NOT_ADMITTED",
+        generated_at="2026-08-17T16:30:00+08:00",
+    )
+    save_play_card(storage, card)
+    _seed_audit(storage)
+    path = Path(storage.db_path)
+    before = _fingerprint(path)
+    result, elapsed = _run_play(path)
+    nonempty = [line for line in result.stdout.splitlines() if line.strip()]
+    assert result.returncode == 0 and elapsed < 5
+    assert len(nonempty) <= 16
+    for text in (
+        "2026-08-18模拟入场；2026-08-20模拟卖出",
+        "PAPER/PLANNED｜NOT_ADMITTED｜实盘仓位0",
+        "000003 扩散股",
+        "模拟买入：09:31可成交快照代理",
+        "20bp",
+        "历史development：3；holdout=HOLDOUT_NOT_OPENED",
+    ):
+        assert text in result.stdout
+    assert "WATCH_ONLY" not in result.stdout
     assert _fingerprint(path) == before
 
 
@@ -401,16 +475,14 @@ def test_cli_shows_latest_plan_and_recent_candidate_results_read_only(tmp_path):
     assert result.returncode == 0, result.stderr
     for text in (
         "今日计划",
-        "最近PAPER结果（仅card lifecycle COMPLETED）：",
-        "2026-08-16 BUYSELL 完成股（3板）",
-        "模拟买入2026-08-17 @ 10.0000",
-        "模拟卖出2026-08-18 @ 11.0000",
-        "成本后收益+9.8000%",
+        "最近FORWARD PAPER结果：",
+        "2026-08-16 BUYSELL COMPLETED：结果已记录；成本后收益+9.8000%",
+        "2026-08-16 NOFIRE NOT_TRIGGERED：D日未成为四板",
+        "2026-08-16 NOFILL UNFILLED：D日一字板，代理不可成交",
+        "2026-08-16 WAITSELL TRIGGERED：结果已记录；"
+        "已模拟买入2026-08-17 @ 12.0000；等待固定退出",
     ):
         assert text in result.stdout
-    assert "NOFIRE" not in result.stdout
-    assert "NOFILL" not in result.stdout
-    assert "WAITSELL" not in result.stdout
     assert "WATCH_ONLY" not in result.stdout
     assert result.stdout.count("历史开发证据：") == 1
     assert elapsed < 5
@@ -488,6 +560,14 @@ def _mock_collection(status: str, *, record_ok: bool = False):
         if record_ok:
             db.execute_write(
                 """
+                INSERT INTO daily_price
+                    (stock_code, trade_date, open, high, low, close, volume, snapshot_time)
+                VALUES ('CAL', ?, 10, 10.2, 9.8, 10, 100, ?)
+                """,
+                (trade_date, f"{trade_date} 16:{attempts:02d}:00"),
+            )
+            db.execute_write(
+                """
                 INSERT INTO zt_pool
                     (stock_code, trade_date, name, consecutive_zt, open_count, snapshot_time)
                 VALUES ('CURRENT', ?, '当前候选', 3, 1, ?)
@@ -514,7 +594,7 @@ def _mock_collection(status: str, *, record_ok: bool = False):
     return collect
 
 
-def test_collect_success_builds_only_h1_idempotently(tmp_path, monkeypatch):
+def test_collect_success_builds_only_attention_play_idempotently(tmp_path, monkeypatch):
     from cli import limit_up
 
     path = tmp_path / "collect-ok.db"
@@ -531,7 +611,7 @@ def test_collect_success_builds_only_h1_idempotently(tmp_path, monkeypatch):
     )
     assert rows == [
         {
-            "play_id": "theme_new_entrant_diffusion_v1",
+            "play_id": "attention_reacceleration_open_v1",
             "paper_status": "PLANNED",
             "admission_status": "NOT_ADMITTED",
         },
@@ -599,7 +679,7 @@ def test_collect_card_build_failure_is_nonzero_and_clear(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise ValueError("synthetic build failure")
 
-    monkeypatch.setattr(limit_up, "build_theme_new_entrant_diffusion_card", fail)
+    monkeypatch.setattr(limit_up, "build_attention_reacceleration_card", fail)
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
     assert result.exit_code != 0
@@ -623,15 +703,20 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
         calls.append("settle_theme")
         return []
 
-    original_theme_build = limit_up.build_theme_new_entrant_diffusion_card
+    def settle_attention(storage):
+        calls.append("settle_attention")
+        return []
 
-    def build_theme(storage, **kwargs):
-        calls.append("build_theme")
-        return original_theme_build(storage, **kwargs)
+    original_attention_build = limit_up.build_attention_reacceleration_card
+
+    def build_attention(storage, **kwargs):
+        calls.append("build_attention")
+        return original_attention_build(storage, **kwargs)
 
     monkeypatch.setattr(limit_up, "settle_three_to_four_cards", settle_three_to_four)
     monkeypatch.setattr(limit_up, "settle_theme_new_entrant_diffusion_cards", settle_theme)
-    monkeypatch.setattr(limit_up, "build_theme_new_entrant_diffusion_card", build_theme)
+    monkeypatch.setattr(limit_up, "settle_attention_reacceleration_cards", settle_attention)
+    monkeypatch.setattr(limit_up, "build_attention_reacceleration_card", build_attention)
 
     result = CliRunner().invoke(limit_up.main, ["collect", "--db", str(path)])
 
@@ -639,7 +724,8 @@ def test_collect_settles_before_building_today_card(tmp_path, monkeypatch):
     assert calls == [
         "settle_three_to_four",
         "settle_theme",
-        "build_theme",
+        "settle_attention",
+        "build_attention",
     ]
     assert not hasattr(limit_up, "build_three_to_four_card")
 

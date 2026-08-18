@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+import json
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,64 @@ def _seed_candidate_day(storage: Storage, candidate_date: str = "2026-08-17") ->
             """,
             (code, candidate_date, name, snapshot),
         )
+    action = date.fromisoformat(candidate_date) + timedelta(days=1)
+    while action.weekday() >= 5:
+        action += timedelta(days=1)
+    action_date = action.isoformat()
+    candidates = [
+        {
+            "stock_code": "000001",
+            "stock_name": "候选甲",
+            "paper_status": "PLANNED",
+            "planned_entry_date": action_date,
+            "lifecycle_events": [
+                {"status": "PLANNED", "recorded_at": "D", "reason": "冻结"}
+            ],
+        },
+        {
+            "stock_code": "600001",
+            "stock_name": "候选乙",
+            "paper_status": "PLANNED",
+            "planned_entry_date": action_date,
+            "lifecycle_events": [
+                {"status": "PLANNED", "recorded_at": "D", "reason": "冻结"}
+            ],
+        },
+    ]
+    generated_at = f"{candidate_date}T16:20:00+08:00"
+    plan = {
+        "play_id": "attention_reacceleration_open_v1",
+        "play_name": "测试",
+        "behavior_logic": "逻辑",
+        "signal_trade_date": candidate_date,
+        "generated_at": generated_at,
+        "trigger_rule": "触发",
+        "abandon_rule": "放弃",
+        "exit_rule": "退出",
+        "admission_status": "NOT_ADMITTED",
+        "candidate_identity": [
+            {"stock_code": item["stock_code"]} for item in candidates
+        ],
+    }
+    plan_hash = hashlib.sha256(
+        json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    storage.execute_write(
+        """
+        INSERT INTO play_cards(
+            play_id,play_name,behavior_logic,signal_trade_date,candidates_json,
+            trigger_rule,abandon_rule,exit_rule,historical_evidence_json,
+            paper_status,admission_status,generated_at
+        ) VALUES('attention_reacceleration_open_v1','测试','逻辑',?,?,
+                 '触发','放弃','退出',?,'PLANNED','NOT_ADMITTED',?)
+        """,
+        (
+            candidate_date,
+            json.dumps(candidates, ensure_ascii=False),
+            json.dumps({"forward_plan": plan, "forward_plan_hash": plan_hash}, ensure_ascii=False),
+            generated_at,
+        ),
+    )
 
 
 def _quote(
@@ -258,12 +317,124 @@ def test_two_phases_are_idempotent_frozen_and_pairable(tmp_path):
     assert pair["open_price"] == 10.5
     assert pair["cumulative_volume_delta"] == 50.0
     assert pair["cumulative_amount_delta"] == 0.0
-
     status = load_prelimit_status(storage.db_path)
     assert status.auction_date == status.open_date == status.paired_date == "2026-08-18"
     assert status.auction_rows == status.open_rows == 2
     assert status.missing_phases == ()
 
+
+def test_latest_failed_audit_blocks_frozen_card_capture(tmp_path):
+    storage = _storage(tmp_path)
+    _seed_candidate_day(storage)
+    storage.execute_write(
+        "INSERT INTO limit_up_collection_runs"
+        "(trade_date,attempted_at,price_rows,zt_rows,status) "
+        "VALUES('2026-08-17','2026-08-17 16:20:00',5000,50,'failed')"
+    )
+    with pytest.raises(PrelimitCaptureError, match="最新记录.*成功审计"):
+        capture_prelimit(
+            storage,
+            AUCTION_PHASE,
+            datetime.fromisoformat("2026-08-18T09:25:00+08:00"),
+            lambda: _quotes("09:25:01"),
+        )
+    assert storage.execute("SELECT COUNT(*) AS n FROM prelimit_snapshots") == [{"n": 0}]
+
+
+def test_zero_candidate_plan_is_auditable_noop(tmp_path):
+    storage = _storage(tmp_path)
+    _seed_candidate_day(storage)
+    evidence = json.loads(
+        storage.execute("SELECT historical_evidence_json FROM play_cards")[0][
+            "historical_evidence_json"
+        ]
+    )
+    evidence["forward_plan"]["candidate_identity"] = []
+    evidence["forward_plan_hash"] = hashlib.sha256(
+        json.dumps(
+            evidence["forward_plan"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    storage.execute_write(
+        "UPDATE play_cards SET candidates_json = '[]', historical_evidence_json = ? "
+        "WHERE play_id = 'attention_reacceleration_open_v1'",
+        (json.dumps(evidence, ensure_ascii=False),),
+    )
+
+    def should_not_fetch():
+        raise AssertionError("zero-candidate plan must not call the market source")
+
+    result = capture_prelimit(
+        storage,
+        AUCTION_PHASE,
+        datetime.fromisoformat("2026-08-18T09:25:00+08:00"),
+        should_not_fetch,
+    )
+    assert result.candidate_count == result.stored_count == 0
+    assert storage.execute("SELECT COUNT(*) AS n FROM prelimit_snapshots") == [{"n": 0}]
+
+
+def test_prelimit_rejects_tampered_frozen_card(tmp_path):
+    storage = _storage(tmp_path)
+    _seed_candidate_day(storage)
+    storage.execute_write(
+        "UPDATE play_cards SET trigger_rule = 'tampered' "
+        "WHERE play_id = 'attention_reacceleration_open_v1'"
+    )
+    with pytest.raises(PrelimitCaptureError, match="不可验证"):
+        capture_prelimit(
+            storage,
+            AUCTION_PHASE,
+            datetime.fromisoformat("2026-08-18T09:25:00+08:00"),
+            lambda: _quotes("09:25:01"),
+        )
+
+
+def test_open_capture_advances_paper_entry_after_snapshot_commit(tmp_path, monkeypatch):
+    from cli import limit_up
+
+    calls = []
+
+    def capture(storage, phase):
+        calls.append("capture_committed")
+        return CaptureResult("2026-08-18", "2026-08-17", phase, 1, 1)
+
+    def settle(storage):
+        calls.append("settle_entry")
+        return []
+
+    monkeypatch.setattr(limit_up, "capture_prelimit", capture)
+    monkeypatch.setattr(limit_up, "settle_attention_reacceleration_cards", settle)
+    result = CliRunner().invoke(
+        limit_up.main,
+        ["capture-prelimit", "--phase", "open", "--db", str(tmp_path / "capture.db")],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == ["capture_committed", "settle_entry"]
+
+
+def test_open_capture_settlement_failure_is_nonzero(tmp_path, monkeypatch):
+    from cli import limit_up
+
+    monkeypatch.setattr(
+        limit_up,
+        "capture_prelimit",
+        lambda storage, phase: CaptureResult("2026-08-18", "2026-08-17", phase, 1, 1),
+    )
+    monkeypatch.setattr(
+        limit_up,
+        "settle_attention_reacceleration_cards",
+        lambda storage: (_ for _ in ()).throw(ValueError("synthetic entry failure")),
+    )
+    result = CliRunner().invoke(
+        limit_up.main,
+        ["capture-prelimit", "--phase", "open", "--db", str(tmp_path / "failure.db")],
+    )
+    assert result.exit_code != 0
+    assert "09:31 PAPER入场推进失败" in result.output
 
 def test_candidate_day_is_exact_previous_market_day_without_stale_fallback(tmp_path):
     stale_storage = _storage(tmp_path, "stale-prior.db")

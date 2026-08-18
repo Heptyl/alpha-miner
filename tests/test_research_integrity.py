@@ -191,7 +191,6 @@ def test_generic_evolution_marks_development_passed_but_never_accepted(tmp_path,
     engine = EvolutionEngine(
         db_path=str(tmp_path / "empty.db"),
         mining_log_path=str(tmp_path / "mining.jsonl"),
-        candidate_pool_path=str(tmp_path / "pool.jsonl"),
     )
     candidate = Candidate(
         "strong_dev",
@@ -212,7 +211,8 @@ def test_generic_evolution_marks_development_passed_but_never_accepted(tmp_path,
 
     assert candidate.development_passed is True
     assert candidate.accepted is False
-    engine._stage_candidate(candidate)
+    assert not hasattr(engine, "candidate_pool")
+    assert not hasattr(engine, "_stage_candidate")
     assert not (tmp_path / "pool.jsonl").exists()
 
 

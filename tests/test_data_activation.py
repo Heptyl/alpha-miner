@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import scripts.activate_data as activation
-from scripts.activate_data import FORBIDDEN_TABLES, activate_snapshot
+from scripts.activate_data import FORBIDDEN_TABLES, ActivationConflict, activate_snapshot
 from scripts.publish_data import publish_snapshot
 from src.data.snapshot_manifest import sha256_file, sidecar_path, validate_pair
 from src.data.storage import Storage
@@ -93,6 +94,26 @@ def test_before_replace_preserves_active_and_incoming_for_retry(tmp_path):
     assert identities == (_identity(active), _identity(sidecar_path(active)), _identity(second), _identity(sidecar_path(second)))
     activate_snapshot(second, active, previous)
     validate_pair(active, sidecar_path(active))
+
+
+def test_expected_hash_is_rechecked_immediately_before_replace(tmp_path):
+    first = _pair(tmp_path, "expected-first", "2026-08-15")
+    active, previous = tmp_path / "active.db", tmp_path / "previous.db"
+    activate_snapshot(first, active, previous)
+    expected = sha256_file(active)
+    second = _pair(tmp_path, "expected-second", "2026-08-18", 11)
+    external = _pair(tmp_path, "external", "2026-08-18", 12)
+
+    def replace_active():
+        shutil.copy2(external, active)
+        shutil.copy2(sidecar_path(external), sidecar_path(active))
+
+    with pytest.raises(ActivationConflict, match="before activation replace"):
+        activate_snapshot(
+            second, active, previous,
+            expected_current_hash=expected, before_replace=replace_active,
+        )
+    assert sha256_file(active) == sha256_file(external)
 
 
 def test_db_replaced_manifest_old_finishes_only_exact_incoming(tmp_path, monkeypatch):

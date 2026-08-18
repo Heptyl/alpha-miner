@@ -62,6 +62,13 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
     name = str(candidate.get("stock_name") or "")
     board_count = candidate.get("board_count")
     suffix = f"（{board_count}板）" if board_count is not None else ""
+    if "attention_slope" in candidate:
+        domains = "+".join(candidate.get("state_domains") or [])
+        return (
+            f"{code} {name}（{candidate.get('industry') or '行业未知'}；{domains}；"
+            f"slope={_format_signed_number(candidate.get('attention_slope'))}；"
+            f"原因：{candidate.get('selection_reason') or '冻结规则命中'}）"
+        )
     if "allowed_open_low" in candidate and "allowed_open_high" in candidate:
         reason = candidate.get("selection_reason") or "预注册条件成立"
         return (
@@ -87,6 +94,10 @@ def _format_signed_percent(value: Any) -> str:
     if _is_finite_number(value):
         return f"{float(value):+.4f}%"
     return "暂无"
+
+
+def _format_signed_number(value: Any) -> str:
+    return f"{float(value):+.4f}" if _is_finite_number(value) else "暂无"
 
 
 def _evidence_lines(evidence: dict[str, Any]) -> list[str]:
@@ -287,6 +298,9 @@ def _entry_text(card: Any) -> str:
 
 
 def _print_card(card: Any, database: ReadOnlyPlayCardDatabase) -> None:
+    if card.play_id == "attention_reacceleration_open_v1":
+        _print_attention_card(card, database)
+        return
     print(f"玩法：{card.play_name}")
     print(f"状态：{_status_text(card)}")
     print(f"数据日：{card.signal_trade_date}｜数据健康：{_data_health(database, card)}")
@@ -311,30 +325,65 @@ def _print_card(card: Any, database: ReadOnlyPlayCardDatabase) -> None:
         print(line)
 
 
-def _completed_results(cards: list[Any]) -> list[tuple[Any, dict[str, Any]]]:
+def _print_attention_card(card: Any, database: ReadOnlyPlayCardDatabase) -> None:
+    evidence = card.historical_evidence
+    print(f"玩法/状态：{card.play_name}｜{_status_text(card)}")
+    print(f"数据：{card.signal_trade_date}｜健康：{_data_health(database, card)}")
+    print(f"行为逻辑：{card.behavior_logic}")
+    if card.candidates:
+        print(
+            f"候选（{len(card.candidates)}只）："
+            + "；".join(_candidate_text(item) for item in card.candidates)
+        )
+    else:
+        print(f"候选（0只）：{evidence.get('empty_reason') or '冻结规则本日无候选'}")
+    entry_date = evidence.get("planned_entry_date") or "下一交易日（绝对日期未具备）"
+    exit_date = evidence.get("planned_exit_date") or "固定退出日（绝对日期未具备）"
+    print(f"计划日期：{entry_date}模拟入场；{exit_date}模拟卖出")
+    print(f"触发：{card.trigger_rule}")
+    print(f"放弃：{card.abandon_rule}")
+    print("模拟买入：09:31可成交快照代理；盘后涨停/open_count不是人工买点")
+    print(f"模拟卖出/成本：{card.exit_rule}")
+    development = evidence.get("historical_development")
+    if isinstance(development, dict):
+        print(
+            "历史development："
+            f"{development.get('completed_signal_days', development.get('status', '未记录'))}；"
+            f"holdout={development.get('holdout_status', 'HOLDOUT_NOT_OPENED')}"
+        )
+    else:
+        print("历史development：未记录；不得冒充前向PAPER结算")
+    print("结论：样本/holdout不足；仅PAPER模拟，未证明统计优势")
+
+
+def _settled_results(cards: list[Any]) -> list[tuple[Any, dict[str, Any]]]:
     return [
         (card, candidate)
         for card in cards
         for candidate in card.candidates
-        if candidate.get("paper_status") == "COMPLETED"
+        if candidate.get("paper_status")
+        in {"NOT_TRIGGERED", "UNFILLED", "INVALID", "TRIGGERED", "COMPLETED"}
     ]
 
 
 def _print_recent_results(cards: list[Any]) -> None:
-    completed = _completed_results(cards)
-    if not completed:
-        print("最近PAPER结果：尚无card lifecycle COMPLETED结果；不会用历史开发样本冒充结算")
+    settled = _settled_results(cards)
+    if not settled:
+        print("最近FORWARD PAPER结果：首批计划尚未结算；不会用历史development冒充结果")
         return
-    print("最近PAPER结果（仅card lifecycle COMPLETED）：")
-    for card, candidate in completed:
-        print(
-            f"  {card.signal_trade_date} {_candidate_text(candidate)}｜"
-            f"模拟买入{candidate.get('entry_trade_date') or '日期缺失'} @ "
-            f"{_format_candidate_number(candidate.get('entry_price'))}｜"
-            f"模拟卖出{candidate.get('exit_trade_date') or '日期缺失'} @ "
-            f"{_format_candidate_number(candidate.get('exit_price'))}｜"
-            f"成本后收益{_format_signed_percent(candidate.get('net_return_pct'))}"
-        )
+    parts = []
+    for card, candidate in settled:
+        status = str(candidate.get("paper_status"))
+        detail = str(candidate.get("pending_reason") or candidate.get("result_reason") or "结果已记录")
+        if status == "COMPLETED":
+            detail += f"；成本后收益{_format_signed_percent(candidate.get('net_return_pct'))}"
+        elif status == "TRIGGERED":
+            detail += (
+                f"；已模拟买入{candidate.get('entry_trade_date') or '日期缺失'} @ "
+                f"{_format_candidate_number(candidate.get('entry_price'))}；等待固定退出"
+            )
+        parts.append(f"{card.signal_trade_date} {candidate.get('stock_code')} {status}：{detail}")
+    print("最近FORWARD PAPER结果：" + "；".join(parts))
 
 
 def run(db_path: str) -> int:

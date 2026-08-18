@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,22 @@ from src.data.snapshot_manifest import (
 
 FORBIDDEN_TABLES = {"dataset_snapshots", "dataset_activations", "research_candidates", "research_evidence"}
 
+
+class ActivationConflict(RuntimeError):
+    """A concurrent publisher changed or locked the canonical market pair."""
+
+@contextmanager
+def activation_lock(destination: Path):
+    lock = destination.resolve().with_suffix(destination.suffix + ".activation.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError as exc:
+        raise ActivationConflict("canonical market activation is already in progress") from exc
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
 
 def _temp(parent: Path, suffix: str) -> Path:
     descriptor, name = tempfile.mkstemp(dir=parent, suffix=suffix)
@@ -75,10 +92,23 @@ def activate_snapshot(
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     before_replace: Callable[[], None] | None = None,
+    expected_current_hash: str | None = None,
+    _lock_held: bool = False,
 ) -> dict[str, object]:
+    if not _lock_held:
+        with activation_lock(destination):
+            return activate_snapshot(
+                incoming, destination, previous, clock=clock,
+                before_replace=before_replace, expected_current_hash=expected_current_hash,
+                _lock_held=True,
+            )
     incoming, destination, previous = incoming.resolve(), destination.resolve(), previous.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination_sidecar = sidecar_path(destination)
+    if expected_current_hash is not None:
+        current = validate_pair(destination, destination_sidecar)
+        if current["source_snapshot_sha256"] != expected_current_hash:
+            raise ActivationConflict("canonical market identity differs from expected hash")
 
     # A valid active pair with the same market identity means both replaces
     # already completed.  Retry only the idempotent incoming cleanup; previous
@@ -142,6 +172,10 @@ def activate_snapshot(
             previous_sidecar_temp.write_text(canonical_json(prior_manifest), encoding="utf-8")
         if before_replace:
             before_replace()
+        if expected_current_hash is not None:
+            current = validate_pair(destination, destination_sidecar)
+            if current["source_snapshot_sha256"] != expected_current_hash:
+                raise ActivationConflict("canonical market changed before activation replace")
         if previous_db_temp and previous_sidecar_temp:
             os.replace(previous_db_temp, previous)
             fsync_path(previous)

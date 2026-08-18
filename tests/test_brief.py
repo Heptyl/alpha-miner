@@ -135,7 +135,7 @@ def _config(tmp: Path) -> BriefConfig:
     return BriefConfig(
         db_path=str(tmp / "test.db"),
         mining_log_path=str(tmp / "mining_log.jsonl"),
-        candidate_pool_path=str(tmp / "candidate_pool.jsonl"),
+        research_ledger_path=str(tmp / "research_ledger.db"),
         out_dir=str(tmp / "brief"),
         reports_dir=str(tmp / "reports"),
     )
@@ -187,13 +187,65 @@ def test_drift_trigger(tmp_path: Path):
     assert "因子漂移: stable_factor" not in html
 
 
-def test_precheck_sample_flag(tmp_path: Path):
-    """4. 预检：样本量 80 的候选因子必须带「样本不足」黄旗。"""
+def test_legacy_candidate_pool_is_not_a_current_evidence_source(tmp_path: Path):
+    """4. Retired JSON candidates cannot be rendered as ledger evidence."""
     _make_normal_db(tmp_path / "test.db")
     _write_candidate(tmp_path, "cand_small", sample_size=80)
     html = _generate_html(tmp_path)
-    assert "cand_small" in html
-    assert "样本不足" in html
+    assert "cand_small" not in html
+    assert "统一研究账本未初始化" in html
+    assert "HOLDOUT_NOT_OPENED" in html
+
+
+def test_brief_reads_latest_unified_development_evidence(tmp_path: Path):
+    _make_normal_db(tmp_path / "test.db")
+    ledger = sqlite3.connect(tmp_path / "research_ledger.db")
+    ledger.executescript(
+        """
+        CREATE TABLE research_candidates(candidate_hash TEXT PRIMARY KEY, candidate_name TEXT);
+        CREATE TABLE research_evidence(
+            sequence_id INTEGER PRIMARY KEY,
+            candidate_hash TEXT,
+            event_type TEXT,
+            payload_json TEXT
+        );
+        INSERT INTO research_candidates VALUES('abc', 'H1 test');
+        """
+    )
+    ledger.execute(
+        "INSERT INTO research_evidence VALUES(1,'abc','DEVELOPMENT_RESULT',?)",
+        (json.dumps({"signal_days": 3, "candidate_count": 2, "filled_count": 1}),),
+    )
+    ledger.commit()
+    ledger.close()
+
+    html = _generate_html(tmp_path)
+    assert "统一研究证据: H1 test" in html
+    assert "独立信号日 3" in html
+    assert "DEVELOPMENT_ONLY" in html
+    assert "不能称为发现" in html
+
+
+def test_brief_does_not_publish_an_opened_or_pending_holdout(tmp_path: Path):
+    _make_normal_db(tmp_path / "test.db")
+    ledger = sqlite3.connect(tmp_path / "research_ledger.db")
+    ledger.executescript(
+        """
+        CREATE TABLE research_candidates(candidate_hash TEXT PRIMARY KEY, candidate_name TEXT);
+        CREATE TABLE research_evidence(
+            sequence_id INTEGER PRIMARY KEY, candidate_hash TEXT,
+            event_type TEXT, payload_json TEXT
+        );
+        INSERT INTO research_candidates VALUES('abc', 'H1 test');
+        INSERT INTO research_evidence VALUES(1,'abc','HOLDOUT_OPENED','{}');
+        """
+    )
+    ledger.commit()
+    ledger.close()
+    html = _generate_html(tmp_path)
+    assert "INCONCLUSIVE_CRASH" in html
+    assert "不得重开或据此准入" in html
+    assert "只解释账本，不发布玩法" in html
 
 
 def test_self_contained(tmp_path: Path):

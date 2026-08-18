@@ -69,7 +69,11 @@ def _spec(**overrides: object) -> CandidateSpec:
             "tables": ["daily_price"],
         },
         "cost_model": {"round_trip_bps": 20},
-        "protocol": {"mode": "RETRO_DEVELOPMENT", "split": "80/20-frozen"},
+        "protocol": {
+            "mode": "RETRO_DEVELOPMENT",
+            "split": "80/20-frozen",
+            "holdout_scope_hash": "a" * 64,
+        },
         "parent_hashes": (),
     }
     values.update(overrides)
@@ -94,6 +98,23 @@ def _count(db_path: Path, table: str) -> int:
         connection.close()
 
 
+def test_load_development_history_returns_exact_candidate_and_payload(ledger_db):
+    _db_path, ledger = ledger_db
+    candidate = _freeze_ready(ledger)
+    history = ledger.load_development_history("FACTOR", candidate.dataset_snapshot_hash)
+    assert len(history) == 1
+    frozen, event = history[0]
+    assert frozen == candidate
+    assert event.candidate_hash == candidate.candidate_hash
+    assert event.event_type == "DEVELOPMENT_RESULT"
+    assert event.payload == {"fitness": 0.12, "status": "DEVELOPMENT_CANDIDATE"}
+    assert ledger.load_development_history("OTHER", candidate.dataset_snapshot_hash) == ()
+
+    pending = ledger.freeze_candidate(_spec(code_text="return 'pending'"))
+    history = ledger.load_development_history("FACTOR", pending.dataset_snapshot_hash)
+    assert (pending, None) in history
+
+
 def _direct_event(
     connection: sqlite3.Connection,
     candidate_hash: str,
@@ -106,12 +127,19 @@ def _direct_event(
     )
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     event_id = hashlib.sha256(f"event:{key}".encode()).hexdigest()
+    scope = None
+    if event_type == "HOLDOUT_OPENED":
+        protocol = connection.execute(
+            "SELECT protocol_json FROM research_candidates WHERE candidate_hash=?",
+            (candidate_hash,),
+        ).fetchone()[0]
+        scope = json.loads(protocol)["holdout_scope_hash"]
     connection.execute(
         """
         INSERT INTO research_evidence (
             event_id, idempotency_key, candidate_hash, lineage_hash,
-            event_type, payload_json, payload_hash, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            event_type, holdout_scope_hash, payload_json, payload_hash, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_id,
@@ -119,6 +147,7 @@ def _direct_event(
             candidate_hash,
             lineage_hash,
             event_type,
+            scope,
             payload_json,
             payload_hash,
             FROZEN_AT,
@@ -444,7 +473,8 @@ def test_direct_sql_holdout_requires_development(ledger_db):
     assert _count(db_path, "research_evidence") == 0
 
 
-def test_direct_sql_holdout_result_requires_opened_event(ledger_db):
+@pytest.mark.parametrize("event_type", ["HOLDOUT_RESULT", "EVALUATION_ERROR"])
+def test_direct_sql_holdout_terminal_requires_opened_event(ledger_db, event_type):
     db_path, ledger = ledger_db
     candidate = _freeze_ready(ledger)
     connection = sqlite3.connect(db_path)
@@ -454,7 +484,7 @@ def test_direct_sql_holdout_result_requires_opened_event(ledger_db):
                 connection,
                 candidate.candidate_hash,
                 candidate.lineage_hash,
-                "HOLDOUT_RESULT",
+                event_type,
                 "no-opened-event",
             )
     finally:
@@ -513,6 +543,28 @@ def test_direct_sql_holdout_rejects_any_lineage_root_overlap(ledger_db):
     finally:
         connection.close()
     assert _count(db_path, "research_evidence") == 3
+
+
+def test_same_frozen_scope_cannot_open_for_a_different_root(ledger_db):
+    db_path, ledger = ledger_db
+    first = _freeze_ready(ledger, code_text="return 'scope-a'")
+    second = _freeze_ready(ledger, code_text="return 'scope-b'")
+    ledger.open_holdout(first.candidate_hash, "open-scope-a")
+
+    with pytest.raises(LineageRetired, match="scope"):
+        ledger.open_holdout(second.candidate_hash, "open-scope-b")
+    connection = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _direct_event(
+                connection,
+                second.candidate_hash,
+                second.lineage_hash,
+                "HOLDOUT_OPENED",
+                "open-scope-direct",
+            )
+    finally:
+        connection.close()
 
 
 def test_holdout_is_committed_before_callback_and_failure_still_retires(ledger_db):
@@ -648,6 +700,22 @@ def test_holdout_result_requires_genuine_once_only_receipt(ledger_db):
             {"mean": 0.01},
             "missing-open",
         )
+    assert _count(db_path, "research_evidence") == 3
+
+
+def test_evaluation_error_consumes_receipt_and_is_idempotent(ledger_db):
+    db_path, ledger = ledger_db
+    candidate = _freeze_ready(ledger)
+    receipt = ledger.open_holdout(candidate.candidate_hash, "open-error")
+    first = ledger.append_evaluation_error(
+        receipt, {"error_type": "RuntimeError"}, "terminal-error"
+    )
+    repeated = ledger.append_evaluation_error(
+        receipt, {"error_type": "RuntimeError"}, "terminal-error"
+    )
+    assert repeated == first
+    with pytest.raises(InvalidHoldoutReceipt, match="already been consumed"):
+        ledger.append_holdout_result(receipt, {"mean": 0.01}, "late-result")
     assert _count(db_path, "research_evidence") == 3
 
 

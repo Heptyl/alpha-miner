@@ -22,23 +22,32 @@ def _make_kb(path: Path):
                 "id": "test_theory",
                 "name": "测试理论",
                 "source": "test",
+                "evidence_grade": "ACADEMIC_FOUNDATION",
                 "core_claim": "测试用",
+                "behavior_states": ["attention_memory", "diffusion"],
+                "testable_target": "次日收益率",
                 "testable_predictions": [
                     {
                         "id": "test_pred_1",
                         "prediction": "条件满足时次日收益为正",
                         "factor_type": "conditional",
+                        "evidence_grade": "THEORY_DERIVED",
+                        "source": "test derivation",
                         "conditions": [
                             {"name": "zt", "table": "zt_pool", "column": "consecutive_zt", "operator": ">=", "value": 2},
                         ],
                         "target": "次日收益率",
+                        "testable_target": "次日收益率",
                     },
                     {
                         "id": "test_pred_2",
                         "prediction": "换手率排名因子",
                         "factor_type": "formula",
+                        "evidence_grade": "HEURISTIC",
+                        "source": "test heuristic",
                         "expression": "turnover_rate.rank()",
                         "target": "次日收益率",
+                        "testable_target": "次日收益率",
                     },
                 ],
             }
@@ -110,7 +119,28 @@ class TestEvolutionEngine:
         assert len(candidates) == 2
         assert candidates[0].name == "test_pred_1"
         assert candidates[0].source == "knowledge"
+        assert candidates[0].config["theory_id"] == "test_theory"
+        assert candidates[0].config["theory_evidence_grade"] == "ACADEMIC_FOUNDATION"
+        assert candidates[0].config["prediction_evidence_grade"] == "THEORY_DERIVED"
+        assert candidates[0].config["behavior_states"] == ["attention_memory", "diffusion"]
+        assert candidates[0].config["testable_target"] == "次日收益率"
         assert candidates[1].name == "test_pred_2"
+
+    def test_heuristic_seed_metadata_is_preserved_without_upgrade(self, tmp_path):
+        knowledge = Path(__file__).parents[1] / "knowledge_base" / "theories.yaml"
+        engine = EvolutionEngine(
+            db_path=str(tmp_path / "unused.db"),
+            knowledge_path=str(knowledge),
+            mining_log_path=str(tmp_path / "unused.jsonl"),
+        )
+        candidate = next(
+            item for item in engine._generate_from_knowledge() if item.name == "small_cap_trap"
+        )
+        assert candidate.config["theory_id"] == "three_shift"
+        assert candidate.config["theory_evidence_grade"] == "HEURISTIC"
+        assert candidate.config["prediction_evidence_grade"] == "HEURISTIC"
+        assert candidate.config["behavior_states"] == ["crowding", "decay"]
+        assert candidate.accepted is False
 
     def test_generate_no_kb(self, tmp_path):
         engine = EvolutionEngine(
@@ -214,24 +244,17 @@ class TestEvolutionEngine:
         assert entry["name"] == "test"
         assert entry["evaluation"]["ic_mean"] == 0.05
 
-    def test_run_with_no_data(self, setup):
-        """完整进化循环，数据库空（所有因子评估失败但不崩溃）。"""
+    def test_run_requires_canonical_active_market(self, setup):
+        """Public evolution must not fall back to an arbitrary mutable database."""
         kb_path, log_path, db_path = setup
         engine = EvolutionEngine(
             db_path=db_path,
             knowledge_path=str(kb_path),
             mining_log_path=str(log_path),
         )
-        # 降低验收标准以便测试
-        engine.MIN_IC = 0.0
-        engine.MIN_ICIR = 0.0
-        engine.MIN_WIN_RATE = 0.0
-
-        accepted = engine.run(generations=1, population_size=3)
-        # 应该跑完不崩溃
-        assert isinstance(accepted, list)
-        # 日志应该有写入
-        assert log_path.exists()
+        with pytest.raises(ValueError, match="data_root/alpha_miner.db"):
+            engine.run(generations=1, population_size=3)
+        assert not log_path.exists()
 
 
 class TestSandbox:

@@ -33,7 +33,7 @@ from src.factors.naming import get_naming  # noqa: E402  (依赖 ROOT 入 sys.pa
 class BriefConfig:
     db_path: str = str(ROOT / "data" / "alpha_miner.db")
     mining_log_path: str = str(ROOT / "data" / "mining_log.jsonl")
-    candidate_pool_path: str = str(ROOT / "data" / "candidate_pool.jsonl")
+    research_ledger_path: str = str(ROOT / "data" / "research_ledger.db")
     out_dir: str = str(ROOT / "reports" / "brief")
     reports_dir: str = str(ROOT / "reports")
     template_dir: str = str(ROOT / "templates")
@@ -312,51 +312,62 @@ def _precheck_flags(evaluation: dict, ic_by_factor: dict[str, list[float]],
     return flags
 
 
-def _candidate_cards(cfg: BriefConfig, ic_by_factor: dict[str, list[float]]) -> list[dict]:
-    """候选池中 pending 的因子 → 待放行卡片。"""
-    pool = _read_jsonl(cfg.candidate_pool_path)
-    state: dict[str, dict] = {}
-    for entry in pool:               # 同名后写覆盖先写（与 CandidatePool 一致）
-        if entry.get("name"):
-            state[entry["name"]] = entry
-    pending = [e for e in state.values() if e.get("status") == "pending"]
-    if not pending:
-        return []
-
-    # 用挖掘日志里同名最后一条记录补评估数据
-    log_by_name: dict[str, dict] = {}
-    for rec in _read_jsonl(cfg.mining_log_path):
-        if rec.get("name"):
-            log_by_name[rec["name"]] = rec
-
-    cards = []
-    for entry in pending:
-        name = entry["name"]
-        rec = log_by_name.get(name, {})
-        ev = rec.get("evaluation") or {}
-        flags = _precheck_flags(ev, ic_by_factor, cfg)
-        hypothesis = (entry.get("config") or {}).get("prediction") \
-            or (rec.get("config") or {}).get("prediction") or "（假说无记录）"
-        wr = ev.get("win_rate")
-        ss = ev.get("sample_size")
-        why = (f"假说：{hypothesis}。回测胜率 {f'{wr:.0%}' if wr is not None else '无记录'}"
-               f" / 盈亏比 无记录 / 样本 {ss if ss is not None else '无记录'}；"
-               f"观察池进度 {entry.get('days_passed', 0)}/5 天通过，"
-               f"连续失败 {entry.get('days_failed', 0)}/3 天")
-        cards.append({
-            "title": f"候选因子待放行: {name}",
+def _candidate_cards(cfg: BriefConfig, _ic_by_factor: dict[str, list[float]]) -> list[dict]:
+    """Render append-only development evidence from the unified ledger."""
+    path = Path(cfg.research_ledger_path)
+    row = None
+    reason = "统一研究账本未初始化"
+    if path.is_file():
+        try:
+            connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    """SELECT c.candidate_name, e.event_type, e.payload_json
+                       FROM research_evidence e
+                       JOIN research_candidates c USING(candidate_hash)
+                       ORDER BY e.sequence_id DESC LIMIT 1"""
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            row = None
+        reason = "统一研究账本无development证据"
+    if row is not None:
+        evidence = json.loads(row["payload_json"])
+        event_type = str(row["event_type"])
+        if event_type == "HOLDOUT_OPENED":
+            status = "INCONCLUSIVE_CRASH"
+            why = "holdout已永久打开但没有终态证据；不得重开或据此准入。"
+        elif event_type in {"HOLDOUT_RESULT", "EVALUATION_ERROR"}:
+            result = evidence.get("result") or {}
+            status = str(result.get("terminal_decision") or event_type)
+            why = str(result.get("summary") or "holdout终态缺少解释摘要")
+            if status == "ADMISSION_APPROVED_PENDING_PUBLICATION":
+                why += "；仅待单一发布者投影，当前USER仍未准入。"
+        else:
+            status = "DEVELOPMENT_ONLY"
+            why = (
+                f"独立信号日 {evidence.get('signal_days', 0)}；"
+                f"候选 {evidence.get('candidate_count', 0)}；"
+                f"成交 {evidence.get('filled_count', 0)}。未打开holdout，不能称为发现。"
+            )
+        return [{
+            "title": f"统一研究证据: {row['candidate_name']}",
             "severity": "yellow",
-            "flags": flags,
-            "what": f"进化引擎产出候选因子并送入观察池（入池 {entry.get('entry_date', '?')}，"
-                    f"最近核查 {entry.get('check_date', '?')}）",
+            "flags": [status],
+            "what": f"账本最新事件：{event_type}",
             "why": why,
-            "actions": [
-                f"uv run python -m cli.mine surgery --factor {name}   # 解剖 IC 序列，诊断有效性来源",
-                "uv run python -m cli.mine history   # 查看完整挖掘记录",
-                "# 注：当前无人工放行 CLI，观察池按 5 天通过/3 天连败自动晋升或淘汰",
-            ],
-        })
-    return cards
+            "actions": ["该简报只解释账本，不发布玩法或改变USER准入状态"],
+        }]
+    return [{
+        "title": reason,
+        "severity": "yellow",
+        "flags": ["HOLDOUT_NOT_OPENED"],
+        "what": "尚无可审计的统一玩法development结果",
+        "why": "旧JSON候选池不再作为当前事实来源",
+        "actions": ["等待后台 mine evolve 生成development证据"],
+    }]
 
 
 def _drift_cards(ic_by_factor: dict[str, list[float]], today: date,

@@ -27,7 +27,6 @@ def _build_llm_client():
     """构建 LLM client，优先 Z.AI Anthropic 兼容接口。"""
     import os
 
-    # 1) 环境变量
     api_key = os.environ.get("GLM_API_KEY") or os.environ.get("ZAI_API_KEY")
     if api_key:
         try:
@@ -39,7 +38,6 @@ def _build_llm_client():
         except ImportError:
             pass
 
-    # 2) openclaw.json
     try:
         import json as _json
         oc = _json.load(open(os.path.expanduser("~/.openclaw/openclaw.json")))
@@ -52,8 +50,6 @@ def _build_llm_client():
             ), "Z.AI (openclaw.json)"
     except Exception:
         pass
-
-    # 3) hermes auth.json
     try:
         import json as _json
         auth = _json.load(open(os.path.expanduser("~/.hermes/auth.json")))
@@ -87,37 +83,43 @@ def cmd_evolve(args):
         api_client=api_client,
         mining_log_path=args.log,
     )
-
     print(f"\n{'='*60}")
     print("  Alpha Miner 进化引擎")
     print(f"  generations={args.generations}, population={args.population}")
     print(f"{'='*60}\n")
 
-    accepted = engine.run(
+    evidence = engine.run(
         generations=args.generations,
         population_size=args.population,
-        resume=not args.fresh,
+        resume=True,
         workers=args.workers,
     )
-
     print(f"\n{'='*60}")
     print("  进化完成")
-    print(f"  总验收因子: {len(accepted)}")
-    print(f"  累计进化代数: {engine.completed_generations}")
-    print(f"  待观察因子: {len(engine.candidate_pool.get_pending())}")
+    print("  研究状态: DEVELOPMENT_ONLY / HOLDOUT_NOT_OPENED")
+    print(f"  完整玩法development证据: {len(evidence)}")
+    print(f"  完整玩法候选: {len(engine.play_development_candidates)}")
+    print(f"  实际完成玩法代数: {engine.completed_generations}")
+    print("  accepted: 0（未打开holdout）")
     print(f"{'='*60}")
 
-    for c in accepted:
-        ic = c.evaluation.get("ic_mean", 0) if c.evaluation else 0
-        print(f"  {c.name:<30} IC={ic:.4f}  gen={c.generation}  source={c.source}")
+    for item in engine.play_development_candidates[:3]:
+        feedback = item["forward_feedback"]
+        why = item["why"]
+        print(
+            f"  {item['execution_hash'][:10]} fitness={item['fitness']:+.4f} "
+            f"forward_feedback={feedback['status']}/{feedback['adjustment']:+.4f}"
+        )
+        print(
+            f"    为什么: {item['mutation_reason']}; failure={item['failure_family']}; "
+            f"domains={','.join(why['state_domains'])}"
+        )
 
 
 def cmd_test_seeds(args):
     """只测试知识库种子，不进化。"""
     engine = EvolutionEngine(db_path=args.db, mining_log_path=args.log)
-
     if getattr(args, "ignore_history", False):
-        # 设为不存在的路径，跳过历史过滤
         engine.mining_log_path = Path("/tmp/.nonexistent_alpha_miner_log")
 
     candidates = engine._generate_from_knowledge()
@@ -158,7 +160,6 @@ def cmd_mutate(args):
     mutator = FactorMutator()
     analyzer = FailureAnalyzer()
 
-    # 构造原始因子配置
     config = {
         "name": args.factor,
         "factor_type": "conditional",
@@ -166,7 +167,6 @@ def cmd_mutate(args):
         "lookback_days": 5,
     }
 
-    # 如果有回测结果，读入
     result = {"ic_mean": 0.0, "icir": 0.0, "avg_sample_per_day": 0, "max_correlation": 0.0}
 
     print(f"[INFO] 对 {args.factor} 做 {args.rounds} 轮变异\n")
@@ -235,7 +235,6 @@ def cmd_lineage(args):
         except json.JSONDecodeError:
             continue
 
-    # 查找相关记录
     target = args.factor
     related = [r for r in records if target in r.get("name", "") or target in r.get("config", {}).get("parent1", "") or target in r.get("config", {}).get("parent2", "")]
 
@@ -264,11 +263,9 @@ def cmd_surgery(args):
     lookback_days = args.days
     ic_threshold = args.threshold
 
-    # 1. 创建 Storage 和 Backtester
     db = Storage(db_path=args.db)
     backtester = FactorBacktester(db=db)
 
-    # 2. 从因子注册表查找因子
     registry = FactorRegistry()
     try:
         factor = registry.get_factor(factor_name)
@@ -279,33 +276,27 @@ def cmd_surgery(args):
 
     compute_fn = factor.compute
 
-    # 3. 运行回测
     print(f"[INFO] 因子手术台: {factor_name}")
     print(f"[INFO] 回测窗口: {lookback_days} 天, IC阈值: {ic_threshold}")
     print()
 
     result = backtester.run(compute_fn, factor_name, lookback_days=lookback_days)
 
-    # 4. 检查回测错误
     if result.error:
         print(f"[ERROR] 回测失败: {result.error}")
         sys.exit(1)
 
-    # 5. 运行手术台分析
     surgery = FactorSurgeryTable()
     report = surgery.analyze(result.ic_series, factor_name, ic_threshold)
 
-    # 6. 打印报告
     print(f"{'='*60}")
     print(f"  因子手术台报告: {report.factor_name}")
     print(f"{'='*60}\n")
 
-    # 整体 IC / ICIR
     print(f"  整体 IC:   {report.overall_ic:+.4f}")
     print(f"  整体 ICIR: {report.overall_icir:+.4f}")
     print()
 
-    # Regime 分段
     if report.regime_breakdown:
         print(f"  {'='*55}")
         print("  市场状态分段 (Regime Breakdown)")
@@ -317,7 +308,6 @@ def cmd_surgery(args):
             print(f"  {r.regime:<16} {r.ic_mean:>+8.4f} {r.icir:>+8.4f} {r.sample_days:>6} {eff:>6}")
         print()
 
-    # 情绪分段
     if report.emotion_breakdown:
         print(f"  {'='*55}")
         print("  情绪分段 (Emotion Breakdown)")
@@ -331,7 +321,6 @@ def cmd_surgery(args):
             print(f"  {label:<16} {e.ic_mean:>+8.4f} {e.icir:>+8.4f} {e.sample_days:>6} {eff:>6}")
         print()
 
-    # 时间分段对比
     if report.time_decay:
         print(f"  {'='*55}")
         print("  时间分段对比 (Time Decay)")
@@ -344,7 +333,6 @@ def cmd_surgery(args):
             print(f"  {label:<16} {t.ic_mean:>+8.4f} {t.sample_days:>6}")
         print()
 
-    # 黄金窗口
     if report.golden_windows:
         print(f"  {'='*55}")
         print("  黄金窗口 (Golden Windows)")
@@ -355,7 +343,6 @@ def cmd_surgery(args):
             print(f"  {w.start_date:<14} {w.end_date:<14} {w.regime:<14} {w.avg_ic:>+8.4f}")
         print()
 
-    # 诊断 + 建议
     diagnosis_labels = {
         "universally_effective": "全局有效",
         "regime_dependent": "依赖市场状态",
@@ -383,30 +370,23 @@ def main():
     parser.add_argument("--log", type=str, default="data/mining_log.jsonl", help="挖掘日志路径")
     subparsers = parser.add_subparsers(dest="command")
 
-    # evolve
     p_evolve = subparsers.add_parser("evolve", help="完整进化循环")
     p_evolve.add_argument("--generations", type=int, default=5, help="进化代数")
     p_evolve.add_argument("--population", type=int, default=10, help="每代种群大小")
     p_evolve.add_argument("--workers", type=int, default=1, help="并行评估候选数；本机默认1，服务器可设8-16")
-    p_evolve.add_argument("--fresh", action="store_true", help="忽略上次 frontier，从知识库重新开始")
 
-    # test-seeds
     p_test = subparsers.add_parser("test-seeds", help="测试知识库种子假说")
     p_test.add_argument("--ignore-history", action="store_true", help="忽略历史失败记录，强制测试所有种子")
 
-    # mutate
     p_mutate = subparsers.add_parser("mutate", help="对指定因子做变异探索")
     p_mutate.add_argument("--factor", type=str, required=True, help="因子名")
     p_mutate.add_argument("--rounds", type=int, default=5, help="变异轮数")
 
-    # history
     subparsers.add_parser("history", help="查看历史挖掘记录")
 
-    # lineage
     p_lineage = subparsers.add_parser("lineage", help="查看因子家谱")
     p_lineage.add_argument("--factor", type=str, required=True, help="因子名")
 
-    # surgery
     p_surgery = subparsers.add_parser("surgery", help="因子手术台 — 解剖IC序列，诊断有效性来源")
     p_surgery.add_argument("--factor", type=str, required=True, help="因子名")
     p_surgery.add_argument("--days", type=int, default=60, help="回测窗口天数 (默认60)")

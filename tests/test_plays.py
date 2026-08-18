@@ -1,5 +1,6 @@
 """Synthetic-data tests for the three-to-four PAPER vertical slice."""
 
+import inspect
 import math
 import sqlite3
 from dataclasses import replace
@@ -10,12 +11,26 @@ import pytest
 from src.data.storage import Storage
 from src.mining.playbook import load_latest_play_cards, save_play_card
 from src.mining.plays import (
+    _evaluate_theme_dates,
     build_theme_new_entrant_diffusion_card,
     build_three_to_four_card,
+    evaluate_theme_new_entrant_development,
     load_usable_audit_dates,
+    select_theme_new_entrant_candidates,
     settle_theme_new_entrant_diffusion_cards,
     settle_three_to_four_cards,
 )
+
+
+def test_h1_forward_and_development_share_one_selection_implementation():
+    builder_source = inspect.getsource(build_theme_new_entrant_diffusion_card)
+    evaluator_source = inspect.getsource(evaluate_theme_new_entrant_development)
+    shared_source = inspect.getsource(_evaluate_theme_dates)
+    assert "select_theme_new_entrant_candidates" in builder_source
+    assert "_evaluate_theme_dates" in evaluator_source
+    assert "select_theme_new_entrant_candidates" in shared_source
+    assert "development_mean_net_return_pct" not in evaluator_source
+    assert callable(select_theme_new_entrant_candidates)
 
 
 def _storage(tmp_path: Path) -> Storage:

@@ -85,6 +85,12 @@ class TestCLISmoke:
         code, out, err = run_cli("mine", "--help")
         assert code == 0, f"mine --help 失败:\n{err}"
 
+    def test_unified_evolution_remains_under_existing_mine_entry(self):
+        code, out, err = run_cli("mine", "evolve", "--help")
+        assert code == 0, err
+        assert "generations" in out
+        assert "population" in out
+
     @pytest.mark.parametrize(
         "command",
         [

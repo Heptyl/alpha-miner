@@ -49,6 +49,7 @@ _POLICIES = {
     "market_emotion": _TablePolicy("trade_date", "date", "snapshot_time"),
     "regime_state": _TablePolicy("trade_date", "date", "snapshot_time"),
     "factor_values": _TablePolicy("trade_date", "date", "snapshot_time"),
+    "limit_up_collection_runs": _TablePolicy("trade_date", "date", "attempted_at"),
     "news": _TablePolicy("publish_time", "datetime", "snapshot_time", False),
     "prelimit_snapshots": _TablePolicy("observed_at", "datetime", "snapshot_time", False),
     "minute_bars_5m": _TablePolicy("bar_time", "datetime", "first_fetched_at"),

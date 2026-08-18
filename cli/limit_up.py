@@ -1,6 +1,7 @@
 """CLI for limit-up data enrichment, structural evolution, and action cards."""
 
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,8 +39,9 @@ from src.mining.limit_up_evolution import (
 )
 from src.mining.playbook import save_play_card
 from src.mining.plays import (
-    build_theme_new_entrant_diffusion_card,
+    build_attention_reacceleration_card,
     load_usable_audit_dates,
+    settle_attention_reacceleration_cards,
     settle_theme_new_entrant_diffusion_cards,
     settle_three_to_four_cards,
 )
@@ -90,6 +92,24 @@ def _collect_and_audit(trade_date: str, db: Storage) -> tuple[dict[str, int], Co
 @click.option("--db", "db_path", default="data/alpha_miner.db", show_default=True)
 def collect_cmd(db_path: str):
     """定时任务入口：采集并严格校验当日涨停历史。"""
+    if os.environ.get("ALPHA_MINER_AUTO_DEVELOPMENT") == "1":
+        from src.mining.after_close import run_after_close
+
+        try:
+            result = run_after_close(
+                db_path, datetime.now().strftime("%Y-%m-%d"), _collect_and_audit
+            )
+        except Exception as exc:
+            raise click.ClickException(f"after-close pipeline failed: {exc}") from exc
+        console.print(
+            f"auto development: {result.collected_rows} rows | "
+            f"canonical={result.canonical_snapshot_hash}"
+        )
+        if result.warning:
+            console.print(f"[yellow]{result.warning}[/yellow]")
+        else:
+            console.print("PAPER card projected from the frozen rank-1 candidate")
+        return
     db = Storage(db_path)
     db.init_db()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -108,6 +128,7 @@ def collect_cmd(db_path: str):
         try:
             settled_cards = settle_three_to_four_cards(db)
             settled_cards.extend(settle_theme_new_entrant_diffusion_cards(db))
+            settled_cards.extend(settle_attention_reacceleration_cards(db))
             for settled_card in settled_cards:
                 save_play_card(db, settled_card)
         except Exception as exc:
@@ -115,8 +136,14 @@ def collect_cmd(db_path: str):
         if settled_cards:
             console.print(f"PAPER模拟交易已结算：{len(settled_cards)} 张历史玩法卡")
         try:
-            cards = [
-                build_theme_new_entrant_diffusion_card(db, signal_date=today),
+            existing = db.execute(
+                "SELECT 1 AS found FROM play_cards "
+                "WHERE play_id = 'attention_reacceleration_open_v1' "
+                "AND signal_trade_date = ? LIMIT 1",
+                (today,),
+            )
+            cards = [] if existing else [
+                build_attention_reacceleration_card(db, signal_date=today)
             ]
             for card in cards:
                 save_play_card(db, card)
@@ -142,6 +169,13 @@ def capture_prelimit_cmd(phase: str, db_path: str):
         result = capture_prelimit(db, normalized_phase)
     except Exception as exc:
         raise click.ClickException(f"涨停前快照采集失败：{exc}") from exc
+    if normalized_phase == OPEN_PHASE:
+        try:
+            settled = settle_attention_reacceleration_cards(db)
+            for card in settled:
+                save_play_card(db, card)
+        except Exception as exc:
+            raise click.ClickException(f"09:31 PAPER入场推进失败：{exc}") from exc
     console.print(
         f"涨停前快照已保存：{result.phase} | 数据日 {result.trade_date} | "
         f"D-1候选日 {result.candidate_trade_date} | {result.stored_count} 行"

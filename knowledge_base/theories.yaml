@@ -1,89 +1,181 @@
-# knowledge_base/theories.yaml
-# 因子挖掘知识库 — 4个理论、12个可测试假说
+# 行为金融知识库：学术理论提供假说来源，所有市场阈值仍需程序化证伪。
+
+evidence_grades:
+  ACADEMIC_FOUNDATION: "同行评议研究支持的理论机制，不代表本市场玩法已成立"
+  THEORY_DERIVED: "从学术机制推导的可检验预测，尚未通过本项目锁定测试"
+  HEURISTIC: "复盘或市场经验叙事，只能作为待证伪假说"
 
 theories:
-  - id: info_cascade
-    name: "信息瀑布模型"
-    source: "BHW 1992 + 实盘验证"
-    core_claim: "涨停板触发全市场注意力阈值信号，后续观察者放弃私有判断跟随公共信号"
+  - id: limited_attention_salience
+    name: "有限注意与显著性"
+    evidence_grade: ACADEMIC_FOUNDATION
+    source: "Barber & Odean (2008), Review of Financial Studies; Da, Engelberg & Gao (2011), Journal of Finance"
+    core_claim: "涨停等极端价格事件形成显著性冲击，并在多个交易日内留下可衰减的注意力记忆"
+    testable_target: "注意力记忆强化或衰减后，下一交易日可成交行为与成本后收益"
+    behavior_states: [attention_memory, diffusion, decay]
     testable_predictions:
       - id: cascade_momentum
-        prediction: "首次涨停后，如果封单稳定，次日高开概率显著高于随机"
+        prediction: "近期首次涨停后，若封板质量稳定且次日竞价注意力再加速，可成交开盘后的延续概率上升"
+        evidence_grade: THEORY_DERIVED
+        source: "有限注意与投资者注意力研究的涨停生态映射"
         factor_type: conditional
-        conditions: ["首次涨停", "封板未开过", "流通市值>20亿"]
-        target: "次日收益率"
-
-      - id: cascade_break_crash
-        prediction: "连板股断板后，反向瀑布导致跌幅远超正常调整"
-        factor_type: conditional
-        conditions: ["前日连板>=3", "今日炸板"]
-        target: "未来3日收益率（应为负）"
+        conditions: ["近期首次涨停", "封板质量稳定", "次日竞价注意力再加速"]
+        target: "D+1可成交入场后的成本后收益"
+        testable_target: "D+1可成交入场后的成本后收益"
 
       - id: seal_decay_warning
-        prediction: "封板单量连续下降是断板前兆，领先断板1-2日"
+        prediction: "封板质量与量价注意力连续下降，预示注意力记忆衰减和炸板风险上升"
+        evidence_grade: THEORY_DERIVED
+        source: "有限注意机制与订单质量的待验证映射"
         factor_type: formula
-        expression: "封板单量 3日变化率"
-        target: "次日是否炸板"
+        expression: "冻结窗口内封板质量、成交量与注意力状态的交易日衰减"
+        target: "下一交易日炸板或破位概率"
+        testable_target: "下一交易日炸板或破位概率"
 
-  - id: three_shift
-    name: "三班组手法"
-    source: "深华发A复盘"
-    core_claim: "游资分三班协作拉升出货，识别信号可规避天地板"
+      - id: salience_volume_reacceleration
+        prediction: "近期涨停记忆股在缩量后重新放量并出现竞价再加速时，趋势延续强于记忆持续衰减组"
+        evidence_grade: THEORY_DERIVED
+        source: "显著性冲击与注意力记忆机制的预注册假说"
+        factor_type: conditional
+        conditions: ["近期涨停记忆仍有效", "缩量后重新放量", "竞价或分钟再加速"]
+        target: "固定持有期成本后收益"
+        testable_target: "固定持有期成本后收益"
+
+  - id: info_cascade
+    name: "信息瀑布与羊群"
+    evidence_grade: ACADEMIC_FOUNDATION
+    source: "Bikhchandani, Hirshleifer & Welch (1992), Journal of Political Economy; Banerjee (1992), Quarterly Journal of Economics"
+    core_claim: "公共涨停信号可能使后续交易者忽略私有信息形成扩散，信号破裂时也可能形成反向瀑布"
+    testable_target: "扩散、拥挤与反向瀑布状态下的可成交收益和尾部风险"
+    behavior_states: [diffusion, crowding, decay]
     testable_predictions:
-      - id: small_cap_trap
-        prediction: "小市值+低换手+无题材的连板股，天地板概率极高"
+      - id: cascade_break_crash
+        prediction: "高拥挤连板在炸板或题材退潮后，反向瀑布使后续跌幅扩大"
+        evidence_grade: THEORY_DERIVED
+        source: "信息瀑布理论的涨停破裂场景映射"
         factor_type: conditional
-        conditions: ["流通市值<20亿", "换手率<10%", "无明确题材", "连板>=3"]
-        target: "未来3日最大跌幅"
+        conditions: ["近期重复涨停或连板", "拥挤状态高", "炸板或题材退潮"]
+        target: "未来3个交易日最大回撤与成本后收益"
+        testable_target: "未来3个交易日最大回撤与成本后收益"
 
-      - id: fund_flow_diverge_exit
-        prediction: "超大单买+大单卖的背离出现在高位连板时，是出货信号"
+      - id: strong_emotion_board_alpha
+        prediction: "涨停生态扩散增强时，尚未涨停的同题材强势新进入者可能出现次日延续"
+        evidence_grade: THEORY_DERIVED
+        source: "信息瀑布与羊群扩散机制的H1映射"
         factor_type: conditional
-        conditions: ["连板>=3", "超大单净流入>0", "大单净流出>0"]
-        target: "次日收益率（应为负）"
+        conditions: ["题材涨停宽度加速", "同题材新进入强势池", "当日尚未涨停"]
+        target: "D+1开盘至D+3开盘的20bp成本后收益"
+        testable_target: "D+1开盘至D+3开盘的20bp成本后收益"
 
-  - id: theme_lifecycle
-    name: "题材生命周期"
-    source: "计划中的四阶段模型"
-    core_claim: "题材有启动→爆发→高潮→衰退的生命周期，不同阶段策略不同"
+  - id: underreaction_post_event_drift
+    name: "反应不足与事件后漂移"
+    evidence_grade: ACADEMIC_FOUNDATION
+    source: "Bernard & Thomas (1989), Journal of Accounting Research; Hong & Stein (1999), Journal of Finance"
+    core_claim: "信息扩散缓慢会使涨停显著性冲击后的趋势在多个交易日内逐步反映，而非只存在于次日"
+    testable_target: "近期涨停后不同记忆强度的多日成本后漂移"
+    behavior_states: [attention_memory, diffusion, decay]
     testable_predictions:
       - id: early_theme_alpha
-        prediction: "题材启动期（1-2日，涨停1-3家）买入，未来5日收益最高"
+        prediction: "题材涨停扩散早期的记忆股与未涨停扩散股，后续趋势强于已经拥挤的后期组"
+        evidence_grade: THEORY_DERIVED
+        source: "事件后漂移与渐进信息扩散机制"
         factor_type: conditional
-        conditions: ["所属题材连续涨停天数<=2", "题材涨停家数<=3"]
-        target: "未来5日收益率"
+        conditions: ["题材扩散处于早期", "注意力记忆未衰减", "拥挤尚未过高"]
+        target: "未来5个交易日成本后收益"
+        testable_target: "未来5个交易日成本后收益"
 
+      - id: post_limit_memory_drift
+        prediction: "涨停后未再次涨停但趋势结构仍在的股票，可能在记忆衰减前继续漂移"
+        evidence_grade: THEORY_DERIVED
+        source: "事件后漂移理论的近期涨停记忆池映射"
+        factor_type: conditional
+        conditions: ["近期曾涨停", "当日未涨停", "趋势未破位", "注意力记忆仍有效"]
+        target: "趋势或回调入场后的固定持有期成本后收益"
+        testable_target: "趋势或回调入场后的固定持有期成本后收益"
+
+  - id: overreaction_crowding_reversal
+    name: "过度反应、拥挤与反转"
+    evidence_grade: ACADEMIC_FOUNDATION
+    source: "De Bondt & Thaler (1985), Journal of Finance; Shiller (1984), American Economic Review"
+    core_claim: "重复显著性冲击可能形成过度反应和拥挤，注意力衰减后收益反转且尾部风险上升"
+    testable_target: "拥挤峰值和衰减转折后的回撤、反转与卖出回避效果"
+    behavior_states: [crowding, decay]
+    testable_predictions:
       - id: crowded_theme_decay
-        prediction: "题材拥挤度>30%（占全市场涨停比例）时，题材即将见顶"
+        prediction: "题材涨停占比和重复涨停集中度过高后，拥挤衰减风险上升"
+        evidence_grade: THEORY_DERIVED
+        source: "过度反应与拥挤反转机制；阈值必须由development冻结"
         factor_type: formula
-        expression: "题材涨停家数 / 全市场涨停家数"
-        target: "未来3日题材平均收益"
+        expression: "题材涨停集中度、重复涨停率与交易日衰减的冻结参数组合"
+        target: "未来3个交易日题材平均收益与最大回撤"
+        testable_target: "未来3个交易日题材平均收益与最大回撤"
 
       - id: narrative_exhaustion
-        prediction: "龙头高位换手率暴增+股价不创新高=出货，题材衰退"
+        prediction: "高位换手放大但价格和扩散不再创新高，表示注意力拥挤正在衰减"
+        evidence_grade: THEORY_DERIVED
+        source: "过度反应后注意力衰减的可观察代理"
         factor_type: conditional
-        conditions: ["是题材龙头", "换手率>前5日均值200%", "未创近3日新高"]
-        target: "未来3日收益率"
-
-  - id: emotion_regime
-    name: "情绪驱动的策略切换"
-    source: "情绪判断框架"
-    core_claim: "不同情绪级别下，最优策略截然不同"
-    testable_predictions:
-      - id: strong_emotion_board_alpha
-        prediction: "情绪极强时（涨停>80家），追高位龙头仍有正收益"
-        factor_type: conditional
-        conditions: ["全市场涨停>80家", "个股连板>=3"]
-        target: "次日收益率"
+        conditions: ["近期涨停记忆强", "换手显著放大", "价格或题材扩散未创新高"]
+        target: "未来3个交易日收益与回撤"
+        testable_target: "未来3个交易日收益与回撤"
 
       - id: weak_emotion_avoid
-        prediction: "情绪极弱时（涨停<20家），任何打板策略都是负期望"
+        prediction: "涨停生态广度与封板质量共同衰减时，追涨玩法的成本后期望下降"
+        evidence_grade: HEURISTIC
+        source: "市场情绪复盘叙事；固定家数阈值不视为学术结论"
         factor_type: conditional
-        conditions: ["全市场涨停<20家"]
-        target: "涨停股次日平均收益（应为负或极低）"
+        conditions: ["涨停广度衰减", "封板质量衰减"]
+        target: "追涨类PAPER玩法成本后收益"
+        testable_target: "追涨类PAPER玩法成本后收益"
 
       - id: emotion_reversal
-        prediction: "情绪极弱持续3日以上，第4日开始涨停股次日收益回升"
+        prediction: "涨停生态持续衰减后首次扩散回升，可能出现注意力状态反转"
+        evidence_grade: HEURISTIC
+        source: "市场情绪周期复盘叙事，需走步验证"
         factor_type: conditional
-        conditions: ["连续3日涨停<20家", "今日涨停家数开始回升"]
-        target: "次日涨停股平均收益"
+        conditions: ["连续多个交易日生态衰减", "涨停广度与封板质量首次同步回升"]
+        target: "下一交易日可成交玩法的成本后收益"
+        testable_target: "下一交易日可成交玩法的成本后收益"
+
+  - id: reference_point_anchoring
+    name: "参考点与锚定"
+    evidence_grade: ACADEMIC_FOUNDATION
+    source: "Kahneman & Tversky (1979), Econometrica; George & Hwang (2004), Journal of Finance"
+    core_claim: "前期涨停价、最高价和成本密集区会成为投资者判断盈亏与趋势延续的参考点"
+    testable_target: "价格接近或突破冻结参考点时的可成交延续与失效概率"
+    behavior_states: [attention_memory, crowding, decay]
+    testable_predictions:
+      - id: prior_limit_anchor_reacceleration
+        prediction: "近期涨停记忆股回调守住冻结参考点后再次放量上行，可能形成注意力再加速"
+        evidence_grade: THEORY_DERIVED
+        source: "参考点、锚定与52周高点效应的涨停生态映射"
+        factor_type: conditional
+        conditions: ["近期曾涨停", "回调未破冻结参考点", "量价再次加速"]
+        target: "再加速可成交入场后的成本后收益与失效率"
+        testable_target: "再加速可成交入场后的成本后收益与失效率"
+
+  - id: three_shift
+    name: "三班组经验叙事"
+    evidence_grade: HEURISTIC
+    source: "个股复盘与市场经验叙事；不是已确立的学术理论"
+    core_claim: "所谓分组协作拉升出货只可作为可证伪风险叙事，不能直接生成准入结论"
+    testable_target: "高位拥挤和资金背离代理对未来回撤的增量解释力"
+    behavior_states: [crowding, decay]
+    testable_predictions:
+      - id: small_cap_trap
+        prediction: "小市值、低换手、题材扩散弱且近期重复涨停的组合可能具有更高尾部回撤"
+        evidence_grade: HEURISTIC
+        source: "三班组复盘叙事，必须作为普通假说走完整PIT与成本验证"
+        factor_type: conditional
+        conditions: ["小市值", "低换手", "题材扩散弱", "近期重复涨停"]
+        target: "未来3个交易日最大跌幅"
+        testable_target: "未来3个交易日最大跌幅"
+
+      - id: fund_flow_diverge_exit
+        prediction: "高位拥挤时的分档资金背离可能是衰减和卖出回避信号"
+        evidence_grade: HEURISTIC
+        source: "三班组复盘叙事，资金分档代理本身不证明协作行为"
+        factor_type: conditional
+        conditions: ["近期重复涨停", "拥挤状态高", "分档资金方向背离"]
+        target: "下一交易日收益与未来3日最大回撤"
+        testable_target: "下一交易日收益与未来3日最大回撤"

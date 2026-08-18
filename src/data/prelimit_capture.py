@@ -8,12 +8,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from zoneinfo import ZoneInfo
 
 from src.data.sources.sina_prelimit import fetch_all_spot
+from src.mining.playbook import load_play_card
 
 AUCTION_PHASE = "AUCTION_0925"
 OPEN_PHASE = "OPEN_0931"
 PHASES = frozenset({AUCTION_PHASE, OPEN_PHASE})
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 # Audited against the SSE 2026 closure notice (上证公告〔2025〕45号):
 # https://www.sse.com.cn/disclosure/dealinstruc/closed/
@@ -116,6 +119,8 @@ def capture_prelimit(
     trade_date = observed.date().isoformat()
 
     candidate_date, candidates = _load_frozen_candidates(storage, trade_date)
+    if not candidates:
+        return CaptureResult(trade_date, candidate_date, phase, 0, 0)
     quotes = fetch_quotes()
     if not isinstance(quotes, list) or not quotes:
         raise PrelimitCaptureError("Sina全市场快照为空，禁止写入空成功")
@@ -261,42 +266,50 @@ def _load_frozen_candidates(
     candidate_date = _previous_trade_date(date.fromisoformat(trade_date)).isoformat()
     rows = storage.execute(
         """
-        SELECT 1 AS ready
-        WHERE EXISTS (
-            SELECT 1 FROM limit_up_collection_runs AS run
-            WHERE run.trade_date = ? AND run.status = 'ok'
-        )
-          AND EXISTS (SELECT 1 FROM zt_pool AS zt WHERE zt.trade_date = ?)
-        """,
-        (candidate_date, candidate_date),
-    )
-    if not rows:
-        raise PrelimitCaptureError(
-            f"上一交易日{candidate_date}没有成功审计的涨停候选，禁止回退更早日期"
-        )
-    zt_rows = storage.execute(
-        """
-        SELECT stock_code, name, snapshot_time
-        FROM zt_pool
+        SELECT status, attempted_at
+        FROM limit_up_collection_runs
         WHERE trade_date = ?
-        ORDER BY stock_code, snapshot_time
+        ORDER BY attempted_at DESC, id DESC
+        LIMIT 1
         """,
         (candidate_date,),
     )
-    latest: dict[str, dict[str, Any]] = {}
-    for row in zt_rows:
-        code = str(row.get("stock_code") or "")
-        existing = latest.get(code)
-        if existing is None or str(row.get("snapshot_time") or "") >= str(
-            existing.get("snapshot_time") or ""
-        ):
-            latest[code] = row
+    if not rows or rows[0].get("status") != "ok" or not is_post_close_attempt(
+        candidate_date, rows[0].get("attempted_at")
+    ):
+        raise PrelimitCaptureError(
+            f"上一交易日{candidate_date}最新记录不是可用盘后成功审计，禁止回退或采集"
+        )
+    try:
+        card = load_play_card(
+            storage, "attention_reacceleration_open_v1", candidate_date
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PrelimitCaptureError("冻结attention玩法卡不可验证") from exc
+    if card is None:
+        raise PrelimitCaptureError("缺少唯一冻结的attention PAPER玩法卡候选")
     candidates = {
-        code: str(row.get("name") or "") for code, row in latest.items() if code
+        str(item.get("stock_code")): str(item.get("stock_name") or "")
+        for item in card.candidates
+        if isinstance(item, dict)
+        and item.get("paper_status") == "PLANNED"
+        and str(item.get("planned_entry_date") or "") == trade_date
+        and str(item.get("stock_code") or "")
     }
-    if not candidates:
-        raise PrelimitCaptureError("最近成功审计涨停日没有冻结候选")
     return candidate_date, candidates
+
+
+def is_post_close_attempt(trade_date: str, value: Any) -> bool:
+    try:
+        attempted = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        event_date = date.fromisoformat(trade_date)
+    except (TypeError, ValueError):
+        return False
+    if attempted.tzinfo is not None:
+        attempted = attempted.astimezone(_SHANGHAI).replace(tzinfo=None)
+    return attempted.date() > event_date or (
+        attempted.date() == event_date and attempted.time() >= time(15, 40)
+    )
 
 
 def _validate_capture_time(phase: str, observed: datetime) -> None:

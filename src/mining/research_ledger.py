@@ -17,7 +17,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -30,7 +30,7 @@ from src.data.snapshot_manifest import (
 
 SCHEMA_VERSION = 1
 EVENT_TYPES = frozenset(
-    {"DEVELOPMENT_RESULT", "HOLDOUT_OPENED", "HOLDOUT_RESULT"}
+    {"DEVELOPMENT_RESULT", "HOLDOUT_OPENED", "HOLDOUT_RESULT", "EVALUATION_ERROR"}
 )
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _GrantResult = TypeVar("_GrantResult")
@@ -102,6 +102,7 @@ class EvidenceEvent:
     candidate_hash: str
     lineage_hash: str
     event_type: str
+    holdout_scope_hash: str | None
     payload: dict[str, Any]
     payload_hash: str
     recorded_at: str
@@ -114,6 +115,7 @@ class HoldoutReceipt:
     opened_event_id: str
     candidate_hash: str
     lineage_hash: str
+    holdout_scope_hash: str
     token: str
 
 
@@ -264,6 +266,7 @@ class ResearchLedger:
         timestamp = self._now()
         token = secrets.token_hex(32)
         payload = {"receipt_token_hash": _sha256_text(token), "schema_version": 1}
+        candidate_scope: str | None = None
         payload_json = _canonical_json(payload, "holdout payload")
         payload_hash = _sha256_text(payload_json)
 
@@ -271,6 +274,7 @@ class ResearchLedger:
         try:
             connection.execute("BEGIN IMMEDIATE")
             candidate = self._load_candidate_locked(connection, candidate_hash)
+            candidate_scope = _candidate_holdout_scope(candidate)
             if not self._has_event_locked(
                 connection, candidate_hash, "DEVELOPMENT_RESULT"
             ):
@@ -286,6 +290,19 @@ class ResearchLedger:
                 connection, candidate_hash, "HOLDOUT_OPENED"
             ) is not None:
                 raise LineageRetired("candidate holdout has already been opened")
+            if connection.execute(
+                "SELECT 1 FROM research_evidence WHERE event_type='HOLDOUT_OPENED' "
+                "AND holdout_scope_hash=?",
+                (candidate_scope,),
+            ).fetchone():
+                raise LineageRetired("holdout scope has already been opened")
+            payload = {
+                "holdout_scope_hash": candidate_scope,
+                "receipt_token_hash": _sha256_text(token),
+                "schema_version": 1,
+            }
+            payload_json = _canonical_json(payload, "holdout payload")
+            payload_hash = _sha256_text(payload_json)
             event = self._insert_event_locked(
                 connection,
                 candidate,
@@ -294,6 +311,7 @@ class ResearchLedger:
                 payload_hash,
                 key,
                 timestamp,
+                candidate_scope,
             )
             connection.commit()
         except Exception:
@@ -306,6 +324,7 @@ class ResearchLedger:
             opened_event_id=event.event_id,
             candidate_hash=candidate_hash,
             lineage_hash=candidate.lineage_hash,
+            holdout_scope_hash=str(candidate_scope),
             token=token,
         )
         return authorize(receipt) if authorize is not None else receipt
@@ -316,12 +335,34 @@ class ResearchLedger:
         result: Mapping[str, Any],
         idempotency_key: str,
     ) -> EvidenceEvent:
-        """Append the sole result bound to a genuine HOLDOUT_OPENED receipt."""
+        return self._append_holdout_terminal(
+            receipt, result, idempotency_key, "HOLDOUT_RESULT"
+        )
+
+    def append_evaluation_error(
+        self,
+        receipt: HoldoutReceipt,
+        result: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> EvidenceEvent:
+        return self._append_holdout_terminal(
+            receipt, result, idempotency_key, "EVALUATION_ERROR"
+        )
+
+    def _append_holdout_terminal(
+        self,
+        receipt: HoldoutReceipt,
+        result: Mapping[str, Any],
+        idempotency_key: str,
+        event_type: str,
+    ) -> EvidenceEvent:
+        """Consume one genuine receipt with exactly one terminal event."""
         if not isinstance(receipt, HoldoutReceipt):
             raise InvalidHoldoutReceipt("receipt must be a HoldoutReceipt")
         _validate_hash(receipt.opened_event_id, "opened_event_id")
         candidate_hash = _validate_hash(receipt.candidate_hash, "candidate_hash")
         lineage_hash = _validate_hash(receipt.lineage_hash, "lineage_hash")
+        scope_hash = _validate_hash(receipt.holdout_scope_hash, "holdout_scope_hash")
         token = _validate_text(receipt.token, "receipt token")
         key = _validate_text(idempotency_key, "idempotency_key")
         timestamp = self._now()
@@ -350,25 +391,29 @@ class ResearchLedger:
                 opened.candidate_hash != candidate_hash
                 or opened.lineage_hash != lineage_hash
                 or candidate.lineage_hash != lineage_hash
+                or opened.holdout_scope_hash != scope_hash
+                or _candidate_holdout_scope(candidate) != scope_hash
                 or opened.payload.get("receipt_token_hash") != _sha256_text(token)
             ):
                 raise InvalidHoldoutReceipt("receipt does not match the opened lineage")
             existing = self._event_by_key_locked(connection, key)
             if existing is not None:
                 event = _event_from_row(existing)
-                if _same_event(event, candidate_hash, "HOLDOUT_RESULT", payload_hash):
+                if _same_event(event, candidate_hash, event_type, payload_hash):
                     connection.commit()
                     return event
                 raise LedgerConflict("idempotency key conflicts with existing evidence")
-            prior = self._event_by_type_locked(
-                connection, candidate_hash, "HOLDOUT_RESULT"
-            )
+            prior = connection.execute(
+                "SELECT * FROM research_evidence WHERE candidate_hash=? "
+                "AND event_type IN ('HOLDOUT_RESULT','EVALUATION_ERROR')",
+                (candidate_hash,),
+            ).fetchone()
             if prior is not None:
                 raise InvalidHoldoutReceipt("holdout receipt has already been consumed")
             event = self._insert_event_locked(
                 connection,
                 candidate,
-                "HOLDOUT_RESULT",
+                event_type,
                 payload_json,
                 payload_hash,
                 key,
@@ -387,6 +432,51 @@ class ResearchLedger:
         connection = self._connect()
         try:
             return self._load_candidate_locked(connection, candidate_hash)
+        finally:
+            connection.close()
+
+    def load_development_history(
+        self,
+        experiment_type: str,
+        dataset_snapshot_hash: str,
+    ) -> tuple[tuple[FrozenCandidate, EvidenceEvent | None], ...]:
+        """Read frozen trials and optional development facts for exact resume."""
+        experiment_type = _validate_text(experiment_type, "experiment_type")
+        dataset_snapshot_hash = _validate_hash(
+            dataset_snapshot_hash, "dataset_snapshot_hash"
+        )
+        connection = self._connect()
+        try:
+            _paper_feedback_receipts_locked(connection)
+            rows = connection.execute(
+                "SELECT candidate.candidate_hash frozen_candidate_hash,evidence.* "
+                "FROM research_candidates candidate LEFT JOIN research_evidence evidence "
+                "ON evidence.candidate_hash=candidate.candidate_hash "
+                "AND evidence.event_type='DEVELOPMENT_RESULT' "
+                "WHERE candidate.experiment_type=? AND candidate.dataset_snapshot_hash=? "
+                "ORDER BY candidate.frozen_at,candidate.candidate_hash",
+                (experiment_type, dataset_snapshot_hash),
+            ).fetchall()
+            return tuple(
+                (self._load_candidate_locked(connection, row["frozen_candidate_hash"]),
+                 _event_from_row(row) if row["event_type"] else None)
+                for row in rows
+            )
+        finally:
+            connection.close()
+
+    def load_paper_feedback_consumption(self, exclude_snapshot_hash: str | None = None):
+        """Load strictly validated, already committed PAPER consumption receipts."""
+        connection = self._connect()
+        try:
+            consumed = {}
+            for event, receipt in _paper_feedback_receipts_locked(connection, exclude_snapshot_hash):
+                bucket = consumed.setdefault(receipt["execution_hash"],
+                                             {"plan_hashes": set(), "event_ids": set()})
+                bucket["plan_hashes"].update(receipt["plan_hashes"])
+                bucket["event_ids"].add(event.event_id)
+            return {key: {name: tuple(sorted(items)) for name, items in value.items()}
+                    for key, value in consumed.items()}
         finally:
             connection.close()
 
@@ -453,6 +543,9 @@ class ResearchLedger:
                 raise LedgerConflict(
                     f"candidate already has conflicting {event_type} evidence"
                 )
+            if event_type == "DEVELOPMENT_RESULT":
+                self._validate_paper_consumption_locked(connection, candidate,
+                                                        json.loads(payload_json))
             event = self._insert_event_locked(
                 connection,
                 candidate,
@@ -469,6 +562,23 @@ class ResearchLedger:
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _validate_paper_consumption_locked(connection, candidate, payload) -> None:
+        incoming = _paper_feedback_receipt(payload)
+        if incoming is None:
+            return
+        candidate_execution = json.loads(candidate.parameters_json).get("execution_hash")
+        if candidate_execution != incoming["execution_hash"]:
+            raise LedgerConflict("PAPER feedback execution differs from frozen candidate")
+        if incoming.get("pending"):
+            return
+        for _event, prior in _paper_feedback_receipts_locked(connection):
+            if set(incoming["plan_hashes"]) & set(prior["plan_hashes"]):
+                raise LedgerConflict("PAPER feedback plan hash was already consumed")
+            if (incoming["execution_hash"] == prior["execution_hash"] and
+                    incoming["window_start"] <= prior["window_end"]):
+                raise LedgerConflict("PAPER feedback receipt window overlaps or moves backwards")
 
     def _freeze_candidate_locked(
         self,
@@ -598,6 +708,7 @@ class ResearchLedger:
         payload_hash: str,
         idempotency_key: str,
         recorded_at: str,
+        holdout_scope_hash: str | None = None,
     ) -> EvidenceEvent:
         if event_type not in EVENT_TYPES:
             raise LedgerValidationError(f"unsupported event_type: {event_type}")
@@ -612,8 +723,8 @@ class ResearchLedger:
             """
             INSERT INTO research_evidence (
                 event_id, idempotency_key, candidate_hash, lineage_hash,
-                event_type, payload_json, payload_hash, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                event_type, holdout_scope_hash, payload_json, payload_hash, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -621,6 +732,7 @@ class ResearchLedger:
                 candidate.candidate_hash,
                 candidate.lineage_hash,
                 event_type,
+                holdout_scope_hash,
                 payload_json,
                 payload_hash,
                 recorded_at,
@@ -801,6 +913,9 @@ def _event_from_row(row: sqlite3.Row) -> EvidenceEvent:
         candidate_hash=str(row["candidate_hash"]),
         lineage_hash=str(row["lineage_hash"]),
         event_type=str(row["event_type"]),
+        holdout_scope_hash=(
+            str(row["holdout_scope_hash"]) if row["holdout_scope_hash"] else None
+        ),
         payload=payload,
         payload_hash=str(row["payload_hash"]),
         recorded_at=str(row["recorded_at"]),
@@ -818,6 +933,78 @@ def _same_event(
         and event.event_type == event_type
         and event.payload_hash == payload_hash
     )
+
+
+def _candidate_holdout_scope(candidate: FrozenCandidate) -> str:
+    try:
+        scope = json.loads(candidate.protocol_json)["holdout_scope_hash"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise LedgerValidationError("candidate protocol lacks holdout_scope_hash") from exc
+    return _validate_hash(scope, "holdout_scope_hash")
+
+
+def _paper_feedback_receipts_locked(connection, exclude_snapshot_hash=None):
+    sql = ("SELECT evidence.*,candidate.dataset_snapshot_hash,candidate.parameters_json "
+           "FROM research_evidence evidence "
+           "JOIN research_candidates candidate USING(candidate_hash) "
+           "WHERE event_type='DEVELOPMENT_RESULT' ORDER BY sequence_id")
+    rows = connection.execute(sql).fetchall()
+    receipts, used, last_end = [], set(), {}
+    for row in rows:
+        event = _event_from_row(row)
+        receipt = _paper_feedback_receipt(event.payload)
+        if receipt is None:
+            continue
+        execution = json.loads(row["parameters_json"]).get("execution_hash")
+        if execution != receipt["execution_hash"]:
+            raise LedgerConflict("stored PAPER feedback execution differs from candidate")
+        if receipt.get("pending"):
+            continue
+        plans, execution = set(receipt["plan_hashes"]), receipt["execution_hash"]
+        if plans & used or receipt["window_start"] <= last_end.get(execution, "0001-01-01"):
+            raise LedgerConflict("stored PAPER feedback receipts overlap or move backwards")
+        used.update(plans)
+        last_end[execution] = receipt["window_end"]
+        if exclude_snapshot_hash != row["dataset_snapshot_hash"]:
+            receipts.append((event, receipt))
+    return receipts
+
+
+def _paper_feedback_receipt(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    evolution = payload.get("evolution")
+    feedback = evolution.get("forward_feedback") if isinstance(evolution, Mapping) else None
+    if not isinstance(feedback, Mapping):
+        return None
+    state = feedback.get("consumption_state")
+    if state not in {"PENDING_THRESHOLD_NOT_CONSUMED", "CONSUMED_ON_APPEND"}:
+        raise LedgerValidationError("PAPER feedback consumption state is invalid")
+    execution = _validate_hash(feedback.get("execution_hash"), "execution_hash")
+    _validate_hash(feedback.get("content_hash"), "feedback content_hash")
+    plan_hashes = tuple(feedback.get("plan_hashes", ()))
+    if tuple(sorted(set(plan_hashes))) != plan_hashes:
+        raise LedgerValidationError("PAPER plan hashes must be sorted and unique")
+    for value in plan_hashes:
+        _validate_hash(value, "consumed plan_hash")
+    start, end = feedback.get("window_start"), feedback.get("window_end")
+    if ((start is None) != (end is None) or start is not None and
+            date.fromisoformat(start) > date.fromisoformat(end)):
+        raise LedgerValidationError("PAPER feedback window is invalid")
+    days = feedback.get("completed_signal_days")
+    keys = ("execution_hash", "plan_hashes", "content_hash", "window_start",
+            "window_end", "completed_signal_days")
+    receipt_hash = _sha256_text(_canonical_json(
+        {key: feedback.get(key) for key in keys}, "PAPER feedback receipt"))
+    if feedback.get("consumption_receipt_hash") != receipt_hash:
+        raise LedgerValidationError("PAPER feedback receipt hash is invalid")
+    if state == "PENDING_THRESHOLD_NOT_CONSUMED":
+        if (type(days) is not int or days >= 5 or feedback.get("adjustment") != 0
+                or feedback.get("status") != "INSUFFICIENT"):
+            raise LedgerValidationError("pending PAPER feedback state/sample is invalid")
+        return {"execution_hash": execution, "pending": True}
+    if not plan_hashes or start is None or type(days) is not int or days < 5:
+        raise LedgerValidationError("consumed PAPER feedback window/sample is invalid")
+    return {"execution_hash": execution, "plan_hashes": plan_hashes,
+            "window_start": start, "window_end": end}
 
 
 def _mapping_copy(value: Mapping[str, Any], field: str) -> dict[str, Any]:

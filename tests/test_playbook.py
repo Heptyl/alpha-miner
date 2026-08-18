@@ -1,5 +1,6 @@
 """Tests for the single-table, precomputed play-card boundary."""
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -95,6 +96,161 @@ def test_latest_batch_and_play_order_are_deterministic(tmp_path):
         "first_board_reseal",
         "three_to_four",
     ]
+
+
+def test_forward_plan_rejects_status_rollback_and_entry_rewrite(tmp_path):
+    storage = _storage(tmp_path)
+    plan = {
+        "play_id": "attention",
+        "play_name": "三进四/四进五",
+        "behavior_logic": "连续涨停形成注意力瀑布，盘中回封检验接力一致性。",
+        "signal_trade_date": "2026-08-17",
+        "generated_at": "2026-08-17T16:20:00+08:00",
+        "trigger_rule": "D日盘中封住第四板或按规则回封时模拟委托。",
+        "abandon_rule": "一字板、队列不可达或回封失败时放弃。",
+        "exit_rule": "D+1起遵守T+1，按止损、止盈或失效事件退出。",
+        "admission_status": "NOT_ADMITTED",
+        "candidate_identity": [{"stock_code": "000001"}],
+    }
+    plan_hash = hashlib.sha256(
+        json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    triggered_candidate = {
+        "stock_code": "000001",
+        "paper_status": "TRIGGERED",
+        "entry_trade_date": "2026-08-18",
+        "entry_price": 10.0,
+        "entry_proxy": "OPEN_0931",
+        "lifecycle_events": [
+            {"status": "PLANNED", "recorded_at": "D", "reason": "frozen"},
+            {"status": "TRIGGERED", "recorded_at": "D+1", "reason": "filled"},
+        ],
+    }
+    card = _card(
+        play_id="attention",
+        candidates=[triggered_candidate],
+        historical_evidence={"forward_plan": plan, "forward_plan_hash": plan_hash},
+        paper_status="TRIGGERED",
+    )
+    save_play_card(storage, card)
+
+    rollback = replace(
+        card,
+        candidates=[
+            {
+                "stock_code": "000001",
+                "paper_status": "PLANNED",
+                "lifecycle_events": triggered_candidate["lifecycle_events"][:1],
+            }
+        ],
+        paper_status="PLANNED",
+    )
+    with pytest.raises(ValueError, match="append-only|backwards"):
+        save_play_card(storage, rollback)
+    rewritten = dict(triggered_candidate, entry_price=99.0)
+    with pytest.raises(ValueError, match="entry"):
+        save_play_card(storage, replace(card, candidates=[rewritten]))
+    completed_candidate = {
+        **triggered_candidate,
+        "paper_status": "COMPLETED",
+        "exit_trade_date": "2026-08-20",
+        "exit_price": 11.0,
+        "net_return_pct": 9.8,
+        "result_reason": "settled",
+        "lifecycle_events": [
+            *triggered_candidate["lifecycle_events"],
+            {"status": "COMPLETED", "recorded_at": "D+3", "reason": "settled"},
+        ],
+    }
+    completed = replace(card, candidates=[completed_candidate], paper_status="COMPLETED")
+    save_play_card(storage, completed)
+    for malicious in (
+        replace(completed, paper_status="PLANNED"),
+        replace(completed, candidates=[dict(completed_candidate, paper_status="UNFILLED")]),
+        replace(completed, candidates=[dict(completed_candidate, net_return_pct=99.0)]),
+        replace(
+            completed,
+            historical_evidence={**completed.historical_evidence, "invented": True},
+        ),
+    ):
+        with pytest.raises(ValueError):
+            save_play_card(storage, malicious)
+    assert load_latest_play_cards(storage) == [completed]
+
+
+def test_forward_plan_compare_and_swap_rejects_concurrent_last_writer(tmp_path):
+    storage = _storage(tmp_path)
+    candidate = {
+        "stock_code": "000001",
+        "paper_status": "PLANNED",
+        "lifecycle_events": [{"status": "PLANNED", "recorded_at": "D", "reason": "frozen"}],
+    }
+    plan = {
+        "play_id": "attention",
+        "play_name": "并发测试",
+        "behavior_logic": "逻辑",
+        "signal_trade_date": "2026-08-17",
+        "generated_at": "2026-08-17T16:20:00+08:00",
+        "trigger_rule": "触发",
+        "abandon_rule": "放弃",
+        "exit_rule": "退出",
+        "admission_status": "NOT_ADMITTED",
+        "candidate_identity": [{"stock_code": "000001"}],
+    }
+    plan_hash = hashlib.sha256(
+        json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    initial = _card(
+        play_id="attention",
+        play_name="并发测试",
+        behavior_logic="逻辑",
+        candidates=[candidate],
+        trigger_rule="触发",
+        abandon_rule="放弃",
+        exit_rule="退出",
+        historical_evidence={"forward_plan": plan, "forward_plan_hash": plan_hash},
+        paper_status="PLANNED",
+    )
+    save_play_card(storage, initial)
+    winner_candidate = {
+        **candidate,
+        "paper_status": "INVALID",
+        "result_reason": "DATA_NOT_READY",
+        "lifecycle_events": [
+            *candidate["lifecycle_events"],
+            {"status": "INVALID", "recorded_at": "D+1", "reason": "DATA_NOT_READY"},
+        ],
+    }
+    winner = replace(initial, candidates=[winner_candidate], paper_status="COMPLETED")
+    desired_candidate = {
+        **candidate,
+        "paper_status": "TRIGGERED",
+        "entry_trade_date": "2026-08-18",
+        "entry_price": 10.0,
+        "entry_proxy": "OPEN_0931",
+        "result_reason": "filled",
+        "lifecycle_events": [
+            *candidate["lifecycle_events"],
+            {"status": "TRIGGERED", "recorded_at": "D+1", "reason": "filled"},
+        ],
+    }
+    desired = replace(initial, candidates=[desired_candidate], paper_status="TRIGGERED")
+
+    class RacingStorage:
+        raced = False
+
+        def execute(self, sql, params=()):
+            return storage.execute(sql, params)
+
+        def execute_write(self, sql, params=()):
+            if not self.raced:
+                self.raced = True
+                save_play_card(storage, winner)
+            storage.execute_write(sql, params)
+
+    with pytest.raises(ValueError, match="concurrent"):
+        save_play_card(RacingStorage(), desired)
+    assert load_latest_play_cards(storage) == [winner]
 
 
 def test_non_admitted_paper_card_is_valid_and_not_watch_only(tmp_path):

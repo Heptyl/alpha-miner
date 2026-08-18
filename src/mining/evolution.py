@@ -1,21 +1,49 @@
 """进化引擎 — 完整进化循环：知识库种子 → LLM翻译 → 沙箱评估 → 变异迭代。"""
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import math
+import random
+import sqlite3
+import subprocess
 import time
 from copy import deepcopy
-from datetime import datetime
+from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
 from src.data.pit import compile_compute_source
+from src.data.storage import Storage
 from src.mining.backtester import FactorBacktester
-from src.mining.candidate_pool import CandidatePool
+from src.mining.behavior_state import BehaviorStateSpec
+from src.mining.experiments import (
+    AttentionReaccelerationRule,
+    DevelopmentEvidence,
+    FrozenPlayProjection,
+    HoldoutEvaluation,
+    PlayCandidate,
+    PlayGenome,
+    canonical_mapping,
+    play_genome_search_space,
+)
 from src.mining.failure_analyzer import FailureAnalyzer
 from src.mining.mutator import FactorMutator
+from src.mining.plays import (
+    ATTENTION_REACCELERATION_PLAY_ID,
+    THEME_NEW_ENTRANT_PLAY_ID,
+    attention_genome_candidate,
+    empty_paper_feedback,
+    evaluate_attention_reacceleration_development,
+    evaluate_theme_new_entrant_development,
+    evaluate_theme_new_entrant_holdout,
+    load_attention_paper_feedback,
+    prepare_attention_reacceleration_partition,
+)
+from src.mining.research_ledger import CandidateSpec, ResearchLedger
 from src.mining.sandbox import Sandbox
 from src.mining.surgery_table import FactorSurgeryTable
 
@@ -24,6 +52,21 @@ logger = logging.getLogger(__name__)
 # 知识库路径
 KB_PATH = Path(__file__).parent.parent.parent / "knowledge_base" / "theories.yaml"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+class _ReadOnlySnapshotStorage(Storage):
+    """Storage-compatible reader that cannot create WAL files or mutate a snapshot."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = str(db_path)
+        self.backtest_mode = False
+
+    def _get_conn(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            f"file:{Path(self.db_path).as_posix()}?mode=ro&immutable=1", uri=True
+        )
+        connection.row_factory = sqlite3.Row
+        return connection
 
 
 class Candidate:
@@ -91,7 +134,6 @@ class EvolutionEngine:
         knowledge_path: str | None = None,
         mining_log_path: str = "data/mining_log.jsonl",
         state_path: str | None = None,
-        candidate_pool_path: str | None = None,
     ):
         self.db_path = db_path
         self.api_client = api_client
@@ -102,21 +144,21 @@ class EvolutionEngine:
             if state_path
             else self.mining_log_path.with_name("evolution_state.json")
         )
-        pool_path = (
-            Path(candidate_pool_path)
-            if candidate_pool_path
-            else self.mining_log_path.with_name("candidate_pool.jsonl")
-        )
         self.sandbox = Sandbox(db_path)
         self.failure_analyzer = FailureAnalyzer()
         self.mutator = FactorMutator()
-        self.candidate_pool = CandidatePool(str(pool_path))
         self.accepted: list[Candidate] = []
         self.development_candidates: list[Candidate] = []
+        self.development_evidence: list[DevelopmentEvidence] = []
+        self.play_development_candidates: list[dict] = []
         self.log: list[dict] = []
         self.completed_generations = 0
         self._seen_signatures: set[str] = set()
         self._state_data_fingerprint: dict | None = None
+        self._ledger: ResearchLedger | None = None
+        self._bound_snapshot = None
+        self._play_candidate: PlayCandidate | None = None
+        self._frozen_candidate = None
 
     # --------------------------------------------------
     # 主循环
@@ -124,12 +166,581 @@ class EvolutionEngine:
 
     def run(
         self,
+        generations: int = 1,
+        population_size: int = 1,
+        resume: bool = True,
+        workers: int = 1,
+        *,
+        total_cost_bps: float = 20,
+    ) -> list[DevelopmentEvidence]:
+        """Run the bounded, resumable executable-play development search."""
+        if generations < 1 or population_size < 1 or workers < 1:
+            raise ValueError("generations, population_size and workers must all be >= 1")
+        active = Path(self.db_path).resolve()
+        if active.name != "alpha_miner.db":
+            raise ValueError("EvolutionEngine requires data_root/alpha_miner.db")
+        ledger = ResearchLedger(active.parent)
+        ledger.init_db()
+        bound = ledger.bind_active_market()
+        self.db_path = str(bound.immutable_path)
+        self.sandbox = Sandbox(self.db_path)
+        reader = _ReadOnlySnapshotStorage(bound.immutable_path)
+        self._ledger, self._bound_snapshot = ledger, bound
+        partition = prepare_attention_reacceleration_partition(
+            reader, bound.source_snapshot_sha256, total_cost_bps
+        )
+        evidence = self._run_play_evolution(
+            ledger, reader, bound, partition, generations, population_size, resume, workers
+        )
+        self.accepted = []
+        self.development_candidates = []
+        self.development_evidence = evidence
+        return self.development_evidence
+
+    def _run_play_evolution(
+        self, ledger, reader, bound, partition,
+        generations: int, population_size: int, resume: bool, workers: int,
+    ) -> list[DevelopmentEvidence]:
+        seeds = self._knowledge_play_genomes()
+        implementation = self._implementation_manifest(
+            attention_genome_candidate(partition, seeds[0]))
+        implementation["theories_sha256"] = hashlib.sha256(self.kb_path.read_bytes()).hexdigest()
+        feedback_cutoff = (partition.development_dates[-1] if partition.development_dates
+                           else date.min.isoformat())
+        feedback = load_attention_paper_feedback(
+            reader,
+            feedback_cutoff,
+            ledger.load_paper_feedback_consumption(bound.source_snapshot_sha256),
+        )
+        protocol = self._play_search_protocol(generations, population_size, workers,
+                                              implementation, seeds, feedback, feedback_cutoff)
+        history = ledger.load_development_history(
+            "EVOLVED_EXECUTABLE_PLAY", bound.source_snapshot_sha256
+        )
+        if history and not resume:
+            raise ValueError("fresh search requires an explicitly different preregistered family")
+        completed: dict[str, dict] = {}
+        pending: dict[int, list] = {}
+        for frozen, event in history:
+            frozen_protocol = json.loads(frozen.protocol_json)
+            stored_protocol = frozen_protocol.get("search_family")
+            if stored_protocol != protocol:
+                if resume:
+                    raise ValueError("resume search protocol differs from frozen family")
+                continue
+            parameters = json.loads(frozen.parameters_json)
+            genome_payload = parameters.get("play_genome")
+            if genome_payload and event is None:
+                pending.setdefault(int(frozen_protocol["generation"]), []).append(frozen)
+            elif genome_payload:
+                completed[parameters["execution_hash"]] = {"frozen": frozen, "payload": event.payload}
+        population = [(genome, None, "KNOWLEDGE_SEED", "SEED")
+                      for genome in seeds[:population_size]]
+        while len(population) < population_size:
+            field = seeds[0].mutable_fields[len(population) - 1]
+            population.append((seeds[0].mutate(field), None, f"INITIAL_DIVERSITY:{field}", "SEED"))
+        all_results = list(completed.values())
+        counts = {}
+        for item in all_results:
+            generation = int(item["payload"].get("evolution", {}).get("generation", 0))
+            counts[generation] = counts.get(generation, 0) + 1
+        start = 0
+        if resume:
+            while start < generations and counts.get(start + 1, 0) >= population_size:
+                start += 1
+        self.completed_generations = start
+        seen = set(completed)
+        if start:
+            population = self._next_play_population(all_results, population_size, start + 1)
+        for generation in range(start + 1, generations + 1):
+            if pending.get(generation):
+                frozen_batch = []
+                for frozen in pending[generation]:
+                    parameters = json.loads(frozen.parameters_json)
+                    frozen_protocol = json.loads(frozen.protocol_json)
+                    candidate = attention_genome_candidate(
+                        partition, self._genome_from_payload(parameters["play_genome"]),
+                        tuple(frozen.parent_hashes),
+                    )
+                    frozen_batch.append((candidate, frozen, generation,
+                                         frozen_protocol["mutation_reason"],
+                                         frozen_protocol["failure_family"]))
+            else:
+                frozen_batch = []
+                unique = []
+                for entry in population:
+                    genome = entry[0]
+                    if genome.execution_hash not in seen:
+                        seen.add(genome.execution_hash)
+                        unique.append(entry)
+                    if len(unique) == population_size:
+                        break
+                for genome, parent, reason, family in unique:
+                    candidate = attention_genome_candidate(
+                        partition, genome,
+                        (parent["frozen"].candidate_hash,) if parent else (),
+                    )
+                    frozen = self._freeze_play_genome(
+                        ledger, bound, candidate, protocol, generation, reason, family
+                    )
+                    frozen_batch.append((candidate, frozen, generation, reason, family))
+            def evaluate(item):
+                candidate, frozen, *_ = item
+                return self._evaluate_play_adapter(reader, candidate, frozen_candidate=frozen)
+            if workers == 1 or len(frozen_batch) < 2:
+                evaluated = [evaluate(item) for item in frozen_batch]
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(workers, len(frozen_batch))
+                ) as executor:
+                    evaluated = list(executor.map(evaluate, frozen_batch))
+            for item, evidence in zip(frozen_batch, evaluated, strict=True):
+                candidate, frozen, gen, reason, family = item
+                evolution = self._play_evolution_fact(
+                    candidate, evidence, protocol, gen, reason, family
+                )
+                payload = {**evidence.to_payload(), "evolution": evolution}
+                ledger.append_development_result(
+                    frozen.candidate_hash, payload, f"development:{frozen.candidate_hash}"
+                )
+                all_results.append({"frozen": frozen, "payload": payload, "evidence": evidence})
+            self.completed_generations = generation
+            population = self._next_play_population(all_results, population_size, generation + 1)
+            if not population:
+                population = [(genome, None, "KNOWLEDGE_RESTART", "SEED") for genome in seeds]
+        ranked = self._play_parents(all_results)
+        self.play_development_candidates = [item["payload"]["evolution"] for item in ranked]
+        return [
+            item.get("evidence") or self._evidence_from_payload(item["payload"])
+            for item in ranked
+        ]
+
+    def _next_play_population(self, results, population_size, generation):
+        parents = self._play_parents(
+            [
+                item for item in results
+                if int(item["payload"].get("evolution", {}).get("generation", 0)) < generation
+            ]
+        )
+        population = []
+        for index in range(population_size * 3):
+            if not parents:
+                break
+            parent = parents[index % len(parents)]
+            genome = self._genome_from_payload(parent["payload"]["evolution"]["genome"])
+            family = parent["payload"]["evolution"]["failure_family"]
+            field = self._directed_mutation_field(genome, family, generation, index)
+            population.append((genome.mutate(field, -1 if index % 2 else 1), parent,
+                               f"DIRECTED_MUTATION:{field}", family))
+        return population
+
+    def _freeze_play_genome(
+        self, ledger, bound, candidate, search_family, generation, reason, failure_family
+    ):
+        implementation = search_family["implementation"]
+        return ledger.freeze_candidate(CandidateSpec(
+            candidate_name=candidate.candidate_name,
+            experiment_type="EVOLVED_EXECUTABLE_PLAY",
+            code_text=canonical_mapping(implementation, "implementation"),
+            parameters=candidate.parameters,
+            data_manifest={
+                "latest_trade_date": bound.latest_trade_date,
+                "required_tables": ["daily_price", "limit_up_collection_runs", "strong_pool", "zb_pool", "zt_pool"],
+                "frozen_partition": candidate.partition.to_dict(),
+            },
+            cost_model=candidate.cost_model,
+            protocol={
+                **candidate.spec.protocol(),
+                "implementation": implementation,
+                "frozen_partition": candidate.partition.to_dict(),
+                "holdout_scope_hash": candidate.partition.holdout_scope_hash,
+                "search_family": search_family,
+                "generation": generation,
+                "mutation_reason": reason,
+                "failure_family": failure_family,
+            },
+            parent_hashes=candidate.parent_hashes,
+        ))
+
+    @staticmethod
+    def _play_search_protocol(
+        generations, population_size, workers, implementation, seeds, feedback,
+        feedback_cutoff,
+    ):
+        if any(item["cutoff_trade_date"] != feedback_cutoff for item in feedback.values()):
+            raise ValueError("forward feedback cutoff differs from frozen development partition")
+        payload = {
+            "deterministic_seed": 20260818,
+            "generations": generations,
+            "population_size": population_size,
+            "workers": workers,
+            "max_trials": generations * population_size,
+            "search_axes": play_genome_search_space(),
+            "fitness": {
+                "formula": "mean_net_return_pct-0.25*max_drawdown_pct+min(completed,40)/40-max(0,40-completed)/20-(unfilled+invalid)/max(candidate_count,1)",
+                "missing_mean_penalty": -2.0,
+                "missing_drawdown_penalty": 8.0,
+            },
+            "family_size": generations * population_size,
+            "multiplicity": "ALL_DEVELOPMENT_TRIALS_RECORDED_NO_PVALUE",
+            "implementation": implementation,
+            "theories_sha256": implementation["theories_sha256"],
+            "seed_manifest": [{"execution_hash": seed.execution_hash,
+                "theory_provenance": seed.to_payload()["theory_provenance"]}
+                for seed in sorted(seeds, key=lambda item: item.execution_hash)],
+            "forward_feedback": {
+                "cutoff_trade_date": feedback_cutoff,
+                "minimum_completed_signal_days": 5,
+                "adjustment_formula": "clip(mean_net_return_pct*0.04,tiered_cap)",
+                "tiered_absolute_caps": {"0-4": 0.0, "5-19": 0.05, "20-39": 0.10, "40+": 0.20},
+                "by_execution": {key: feedback[key] for key in sorted(feedback)},
+            },
+        }
+        family = canonical_mapping(payload, "search family").encode()
+        payload["search_family_hash"] = hashlib.sha256(family).hexdigest()
+        return payload
+
+    def _knowledge_play_genomes(self) -> list[PlayGenome]:
+        content = self.kb_path.read_text(encoding="utf-8-sig")
+        theories = (yaml.safe_load(content) or {}).get("theories", [])
+        by_execution = {}
+        for theory in theories:
+            states = set(theory.get("behavior_states", []))
+            domains = []
+            if states & {"attention_memory", "decay", "crowding"}:
+                domains.extend(("recent_limit_memory", "post_limit_non_limit"))
+            if "diffusion" in states:
+                domains.append("industry_diffusion_non_limit")
+            if not domains:
+                continue
+            for prediction in theory.get("testable_predictions", []):
+                genome = PlayGenome(
+                    str(theory["id"]), str(prediction["id"]),
+                    str(prediction.get("evidence_grade", theory.get("evidence_grade"))),
+                    BehaviorStateSpec(),
+                    replace(
+                        AttentionReaccelerationRule(),
+                        allowed_state_domains=tuple(sorted(set(domains))),
+                    ),
+                )
+                prior = by_execution.get(genome.execution_hash)
+                if prior is None:
+                    by_execution[genome.execution_hash] = genome
+                else:
+                    prior_source = prior.theory_provenance or ((prior.theory_id, prior.prediction_id, prior.evidence_grade),)
+                    provenance = tuple(sorted(set(prior_source + (
+                        (genome.theory_id, genome.prediction_id, genome.evidence_grade),))))
+                    by_execution[genome.execution_hash] = replace(prior, theory_provenance=provenance)
+        genomes = list(by_execution.values())
+        if not genomes:
+            raise ValueError("knowledge base has no behavior-state play seeds")
+        return genomes
+
+    @staticmethod
+    def _genome_from_payload(payload) -> PlayGenome:
+        return PlayGenome.from_payload(payload)
+
+    def ranked_play_projections(self, limit: int = 3) -> tuple[FrozenPlayProjection, ...]:
+        """Re-read and validate ledger facts before exposing ranked identities."""
+        if isinstance(limit, bool) or limit < 1:
+            raise ValueError("projection limit must be positive")
+        if self._ledger is None or self._bound_snapshot is None:
+            raise RuntimeError("development run has not bound a research ledger")
+        projections, seen = [], set()
+        for frozen, event in self._ledger.load_development_history(
+            "EVOLVED_EXECUTABLE_PLAY", self._bound_snapshot.source_snapshot_sha256
+        ):
+            if event is None:
+                continue
+            parameters = json.loads(frozen.parameters_json)
+            protocol = json.loads(frozen.protocol_json)
+            fact = event.payload.get("evolution", {})
+            projection = FrozenPlayProjection(
+                1, float(fact["fitness"]), frozen.candidate_hash,
+                frozen.lineage_hash, frozen.dataset_snapshot_hash,
+                fact["search_family_hash"], fact["genome_hash"],
+                fact["execution_hash"], fact["genome"], fact["research_status"],
+                fact["usage_status"], fact["holdout_status"], fact["admission_status"],
+            )
+            identity = event.candidate_hash == frozen.candidate_hash and (
+                event.lineage_hash == frozen.lineage_hash
+                and frozen.dataset_snapshot_hash == self._bound_snapshot.source_snapshot_sha256
+                and parameters.get("play_genome") == fact.get("genome")
+                and parameters.get("genome_hash") == fact.get("genome_hash")
+                and parameters.get("execution_hash") == fact.get("execution_hash")
+                and protocol.get("search_family", {}).get("search_family_hash")
+                == fact.get("search_family_hash")
+            )
+            if not identity or projection.candidate_hash in seen:
+                raise ValueError("ledger development projection identity is invalid or duplicated")
+            projection.validate()
+            if self._ledger.load_lineage_state(projection.candidate_hash).retired:
+                raise RuntimeError("retired lineage cannot be projected into PAPER")
+            seen.add(projection.candidate_hash)
+            projections.append(projection)
+        ranked = sorted(projections, key=lambda item: (-item.fitness, item.execution_hash))
+        return tuple(replace(item, rank=rank) for rank, item in enumerate(ranked[:limit], 1))
+
+    @staticmethod
+    def _play_fitness(payload) -> float:
+        mean = payload.get("mean_net_return_pct")
+        drawdown = payload.get("max_drawdown_pct")
+        completed = int(payload.get("completed_signal_days", 0))
+        candidates = max(1, int(payload.get("candidate_count", 0)))
+        negative = int(payload.get("unfilled_count", 0)) + sum(
+            int(value) for value in payload.get("invalidation_counts", {}).values()
+        )
+        base = (
+            (float(mean) if mean is not None else -2.0)
+            - 0.25 * (float(drawdown) if drawdown is not None else 8.0)
+            + min(completed, 40) / 40
+            - max(0, 40 - completed) / 20
+            - negative / candidates
+        )
+        return base + float(
+            payload.get("evolution", {}).get("forward_feedback", {}).get("adjustment", 0)
+        )
+
+    def _play_parents(self, results):
+        return sorted(results, key=lambda item: (
+            -self._play_fitness(item["payload"]),
+            item["payload"]["evolution"]["execution_hash"],
+        ))
+
+    @staticmethod
+    def _failure_family(
+        evidence: DevelopmentEvidence, feedback: dict
+    ) -> tuple[str, list[str]]:
+        reasons = []
+        feedback_counts = feedback["status_signal_days"]
+        if feedback["completed_signal_days"] >= 5 and (
+            feedback_counts["UNFILLED"] + feedback_counts["INVALID"]
+            > feedback_counts["COMPLETED"]
+        ):
+            reasons.append("EXECUTABILITY")
+        if evidence.completed_signal_days < 40:
+            reasons.append("SMALL_SAMPLE")
+        invalid = sum(evidence.invalidation_counts.values())
+        if evidence.unfilled_count + invalid > evidence.filled_count:
+            reasons.append("EXECUTABILITY")
+        if evidence.mean_net_return_pct is None or evidence.mean_net_return_pct <= 0:
+            reasons.append("NON_POSITIVE_NET_RETURN")
+        if evidence.max_drawdown_pct is None or evidence.max_drawdown_pct > 10:
+            reasons.append("DRAWDOWN")
+        return (reasons[0] if reasons else "WEAK_RISK_ADJUSTED_RETURN", reasons)
+
+    def _play_evolution_fact(
+        self, candidate, evidence, search_family, generation, reason, failure_family
+    ):
+        genome = candidate.parameters["play_genome"]
+        feedback_scope = search_family["forward_feedback"]
+        execution_hash = candidate.parameters["execution_hash"]
+        feedback = feedback_scope["by_execution"].get(execution_hash)
+        feedback = feedback or empty_paper_feedback(
+            execution_hash, feedback_scope["cutoff_trade_date"])
+        derived_family, eliminated = self._failure_family(evidence, feedback)
+        base_fitness = self._play_fitness(evidence.to_payload())
+        return {
+            "genome": genome,
+            "genome_hash": candidate.parameters["genome_hash"],
+            "execution_hash": candidate.parameters["execution_hash"],
+            "generation": generation,
+            "parent_candidate_hashes": list(candidate.parent_hashes),
+            "mutation_reason": reason,
+            "mutation_source_failure_family": failure_family,
+            "failure_family": derived_family,
+            "base_development_fitness": base_fitness,
+            "fitness": base_fitness + feedback["adjustment"],
+            "forward_feedback": feedback,
+            "eliminated_reasons": eliminated,
+            "search_family_hash": search_family["search_family_hash"],
+            "research_status": "DEVELOPMENT_CANDIDATE",
+            "usage_status": "PAPER_ONLY",
+            "holdout_status": "HOLDOUT_NOT_OPENED",
+            "admission_status": "NOT_ADMITTED",
+            "why": {
+                "theory_provenance": genome["theory_provenance"],
+                "state_domains": genome["play_rule"]["allowed_state_domains"],
+                "thresholds": genome["play_rule"],
+                "parent_candidate_hashes": list(candidate.parent_hashes),
+                "mutation_reason": reason,
+                "failure_family": derived_family,
+                "dataset_snapshot_hash": candidate.partition.dataset_snapshot_hash,
+                "partition_hash": candidate.partition.partition_hash,
+                "search_family_hash": search_family["search_family_hash"],
+                "development_metrics": evidence.to_payload(),
+                "forward_feedback": feedback,
+                "feedback_scope": "EXECUTION_ONLY_NOT_THEORY_OR_LINEAGE_EVIDENCE",
+                "eliminated_reasons": eliminated,
+            },
+        }
+
+    @staticmethod
+    def _directed_mutation_field(genome, family, generation, index):
+        fields = {
+            "SMALL_SAMPLE": ("lookback_trade_days", "min_total_attention", "max_candidates"),
+            "EXECUTABILITY": ("entry_gap_low_pct", "entry_gap_high_pct", "max_candidates"),
+            "NON_POSITIVE_NET_RETURN": ("min_attention_slope", "min_total_attention", "min_diffusion_attention"),
+            "DRAWDOWN": ("max_crowding", "max_decay_age_trade_days", "failed_board_decay_weight"),
+        }.get(family, genome.mutable_fields)
+        rng = random.Random(20260818 + generation * 10_007 + index)
+        return fields[rng.randrange(len(fields))]
+
+    @staticmethod
+    def _evidence_from_payload(payload) -> DevelopmentEvidence:
+        fields = DevelopmentEvidence.__dataclass_fields__
+        values = {key: payload[key] for key in fields if key in payload}
+        values["data_limitations"] = tuple(values["data_limitations"])
+        evidence = DevelopmentEvidence(**values)
+        evidence.to_payload()
+        return evidence
+
+    def _evaluate_play_adapter(
+        self,
+        storage: Storage,
+        candidate: PlayCandidate,
+        *,
+        frozen_candidate=None,
+    ) -> DevelopmentEvidence:
+        frozen_candidate = frozen_candidate or self._frozen_candidate
+        if self._ledger is not None and frozen_candidate is not None:
+            state = self._ledger.load_lineage_state(
+                frozen_candidate.candidate_hash
+            )
+            if state.retired:
+                raise RuntimeError("retired lineage cannot read development data")
+        if candidate.spec.adapter_id == THEME_NEW_ENTRANT_PLAY_ID:
+            return evaluate_theme_new_entrant_development(storage, candidate)
+        if candidate.spec.adapter_id == ATTENTION_REACCELERATION_PLAY_ID:
+            return evaluate_attention_reacceleration_development(storage, candidate)
+        raise ValueError(f"unsupported experiment adapter: {candidate.spec.adapter_id}")
+
+    def evaluate_holdout(
+        self,
+        *,
+        authorize_once: bool = False,
+        _reader_factory=None,
+    ) -> HoldoutEvaluation:
+        """Explicitly open one mature H1 holdout; never called by ``run`` or CLI."""
+        if not all(
+            (self._ledger, self._bound_snapshot, self._play_candidate, self._frozen_candidate)
+        ):
+            raise RuntimeError("run must freeze H1 before holdout maturity can be checked")
+        ledger = self._ledger
+        bound = self._bound_snapshot
+        candidate = self._play_candidate
+        frozen = self._frozen_candidate
+        if candidate.spec.adapter_id != THEME_NEW_ENTRANT_PLAY_ID:
+            raise RuntimeError("HOLDOUT_NOT_OPENED: unsupported evolved attention adapter")
+        partition = candidate.partition
+        maturity = {
+            "available_reserved_audit_days": len(partition.reserved_dates),
+            "required_completed_signal_days": partition.min_completed_signal_days,
+            "required_fill_signal_days": partition.min_fill_signal_days,
+            "partition_hash": partition.partition_hash,
+            "holdout_scope_hash": partition.holdout_scope_hash,
+        }
+        if len(partition.reserved_dates) < partition.min_completed_signal_days:
+            result = HoldoutEvaluation(
+                False,
+                "NOT_OPENED_IMMATURE",
+                "reserved审计日不足40，未打开且未读取收益",
+                maturity,
+            )
+            result.validate()
+            return result
+        if not authorize_once:
+            result = HoldoutEvaluation(
+                False,
+                "READY_NOT_OPENED",
+                "成熟度已满足，但缺少一次性内部授权，holdout仍未打开",
+                maturity,
+            )
+            result.validate()
+            return result
+        reader_factory = _reader_factory or _ReadOnlySnapshotStorage
+        def evaluate_after_commit(receipt):
+            identity = {
+                "candidate_hash": frozen.candidate_hash,
+                "lineage_hash": frozen.lineage_hash,
+                "dataset_snapshot_hash": bound.source_snapshot_sha256,
+                "partition": partition.to_dict(),
+                "protocol": candidate.spec.protocol(),
+                "cost_model": candidate.cost_model,
+                "holdout_scope_hash": partition.holdout_scope_hash,
+                "opened_event_id": receipt.opened_event_id,
+            }
+            try:
+                metrics = evaluate_theme_new_entrant_holdout(
+                    reader_factory(bound.immutable_path), candidate
+                )
+                terminal = str(metrics["terminal_decision"])
+                payload = {
+                    **identity,
+                    **metrics,
+                    "summary": (
+                        f"{terminal}: 独立完成信号日{metrics['completed_signal_days']}，"
+                        f"成交信号日{metrics['fill_signal_days']}"
+                    ),
+                }
+                ledger.append_holdout_result(
+                    receipt, payload, f"holdout-result:{receipt.opened_event_id}"
+                )
+            except Exception as exc:
+                terminal = "EVALUATION_ERROR"
+                payload = {
+                    **identity,
+                    "terminal_decision": terminal,
+                    "summary": f"holdout evaluator failed: {type(exc).__name__}",
+                }
+                ledger.append_evaluation_error(
+                    receipt, payload, f"holdout-error:{receipt.opened_event_id}"
+                )
+            result = HoldoutEvaluation(True, terminal, str(payload["summary"]), payload)
+            result.validate()
+            return result
+        return ledger.open_holdout(
+            frozen.candidate_hash,
+            f"holdout-open:{frozen.candidate_hash}:{partition.holdout_scope_hash}",
+            authorize=evaluate_after_commit,
+        )
+
+    @staticmethod
+    def _implementation_manifest(candidate: PlayCandidate) -> dict:
+        root = Path(__file__).resolve().parents[2]
+        sources = [
+            Path(__file__).resolve(),
+            Path(__file__).with_name("experiments.py").resolve(),
+            Path(__file__).with_name("plays.py").resolve(),
+            Path(__file__).with_name("behavior_state.py").resolve(),
+        ]
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError("Git HEAD is required to freeze implementation identity") from exc
+        return {
+            "adapter_id": candidate.spec.adapter_id,
+            "git_head": head,
+            "source_sha256": {
+                path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sources
+            },
+        }
+
+    def _run_factor_hypothesis_development(
+        self,
         generations: int = 5,
         population_size: int = 10,
         resume: bool = True,
         workers: int = 1,
     ) -> list[Candidate]:
-        """运行可续跑的进化循环。
+        """持续搜索因子假说；结果不是完整玩法或正式账本证据。
 
         旧实现每次都从知识库第一代重跑，而且只变异已经通过的候选；绝大多数
         失败诊断没有进入下一代。现在会恢复上次 frontier，同时让有有效评估的
@@ -137,11 +748,9 @@ class EvolutionEngine:
         """
         if generations < 1 or population_size < 1 or workers < 1:
             raise ValueError("generations, population_size and workers must all be >= 1")
-
         if resume:
             candidates = self._load_progress()
         else:
-            # ``--fresh`` must be deterministic even when the same engine object is reused.
             self.accepted = []
             self.development_candidates = []
             self.log = []
@@ -158,12 +767,10 @@ class EvolutionEngine:
             candidates = seeds[:population_size]
             if not candidates:
                 candidates = self._restart_population(population_size)
-
         logger.info(
             "进化引擎启动: generations=%d, population=%d, workers=%d, resume=%s, start_gen=%d",
             generations, population_size, workers, resume, self.completed_generations + 1,
         )
-
         for _ in range(generations):
             gen_start = time.time()
             generation_number = self.completed_generations + 1
@@ -178,7 +785,6 @@ class EvolutionEngine:
 
             for candidate in candidates:
                 candidate.generation = generation_number
-
             if workers == 1 or len(candidates) == 1:
                 for candidate in candidates:
                     self._evaluate(candidate)
@@ -200,7 +806,6 @@ class EvolutionEngine:
             for candidate in candidates:
                 self._seen_signatures.add(self._candidate_signature(candidate))
                 self._write_log(candidate)
-
             development_passed = [
                 candidate for candidate in candidates if candidate.development_passed
             ]
@@ -215,7 +820,6 @@ class EvolutionEngine:
             self.completed_generations = generation_number
             self._save_progress(next_candidates, current_fingerprint)
             candidates = next_candidates
-
             logger.info(
                 "第 %d 代耗时: %.1fs, 下一代=%d",
                 generation_number, time.time() - gen_start, len(candidates),
@@ -271,20 +875,16 @@ class EvolutionEngine:
         mutations: list[Candidate] = []
         viable = [candidate for candidate in evaluated if self._fitness(candidate) > float("-inf")]
         viable.sort(key=self._fitness, reverse=True)
-
         parent_limit = max(1, math.ceil(population_size / 2))
         for parent in viable[:parent_limit]:
             mutations.extend(self._mutate_candidate(parent)[:2])
-
         crossovers: list[Candidate] = []
         if len(self.development_candidates) >= 2:
             crossovers = self._crossover(self.development_candidates)
-
         fresh_seeds = self._dedupe_candidates(
             self._generate_from_knowledge(),
             exclude_seen=True,
         )
-
         # 保留探索配额，避免表现尚可的同一血统一直占满整个人口。
         seed_slots = min(len(fresh_seeds), max(1, population_size // 4))
         crossover_slots = min(len(crossovers), max(1, population_size // 5))
@@ -294,32 +894,23 @@ class EvolutionEngine:
             + crossovers[:crossover_slots]
             + fresh_seeds[:seed_slots]
         )
-
         # 某一类不足时用其他类补齐。
         overflow = mutations[mutation_slots:] + crossovers[crossover_slots:] + fresh_seeds[seed_slots:]
         selected.extend(overflow)
-
         return self._dedupe_candidates(selected, exclude_seen=True)[:population_size]
 
     def _restart_population(self, population_size: int) -> list[Candidate]:
-        """Revive an exhausted frontier from the best historical failures.
-
-        A finite knowledge seed set must not turn a long-running evolution job into
-        a no-op. Historical candidates retain their executable code and evaluation,
-        so they are better restart parents than rerunning the original seed.
-        """
+        """Revive an exhausted frontier from the best historical failures."""
         parents = self._historical_candidates()
         parent_signatures = {self._candidate_signature(candidate) for candidate in parents}
         for candidate in self.development_candidates:
             if self._candidate_signature(candidate) not in parent_signatures:
                 parents.append(candidate)
         parents.sort(key=self._fitness, reverse=True)
-
         offspring: list[Candidate] = []
         parent_limit = max(1, math.ceil(population_size / 2))
         for parent in parents[:parent_limit]:
             offspring.extend(self._mutate_candidate(parent))
-
         candidates = self._dedupe_candidates(offspring, exclude_seen=True)
         if len(candidates) < population_size:
             for index, parent in enumerate(parents):
@@ -329,7 +920,6 @@ class EvolutionEngine:
                 candidates = self._dedupe_candidates(candidates, exclude_seen=True)
                 if len(candidates) >= population_size:
                     break
-
         candidates = candidates[:population_size]
         if candidates:
             logger.warning(
@@ -339,7 +929,6 @@ class EvolutionEngine:
         return candidates
 
     def _historical_candidates(self) -> list[Candidate]:
-        """Load the latest evaluable version of each semantic candidate from JSONL."""
         if not self.mining_log_path.exists():
             return []
         latest: dict[str, Candidate] = {}
@@ -356,21 +945,18 @@ class EvolutionEngine:
         return list(latest.values())
 
     def _restart_variant(self, parent: Candidate, index: int) -> Candidate | None:
-        """Create a deterministic but executable exploration variant for a restart."""
         epoch = self.completed_generations + 1
         config = deepcopy(parent.config)
         config["parent_name"] = parent.name
         config["base_name"] = parent.config.get("base_name", parent.name)
         config["mutation_depth"] = int(parent.config.get("mutation_depth", 0)) + 1
         config["restart_epoch"] = epoch
-
         numeric_conditions = [
             condition
             for condition in config.get("conditions", [])
             if isinstance(condition, dict) and isinstance(condition.get("value"), (int, float))
         ]
         if numeric_conditions:
-            # 0.55 .. 1.45; changing the threshold changes executable behavior.
             ratio = 0.55 + ((epoch * 17 + index * 11) % 91) / 100
             for condition in numeric_conditions:
                 condition["value"] *= ratio
@@ -388,7 +974,6 @@ class EvolutionEngine:
             code = self._wrap_mutation_code(parent.code, config)
         else:
             return None
-
         return Candidate(
             name=name,
             source="restart",
@@ -409,17 +994,10 @@ class EvolutionEngine:
                 self.development_candidates.append(candidate)
                 existing.add(signature)
 
-    def _stage_candidate(self, candidate: Candidate) -> None:
-        """P0 guard: development evidence must never enter the acceptance pool."""
-        candidate.accepted = False
-        logger.warning("holdout未打开，禁止写入CandidatePool：%s", candidate.name)
-
     def _data_fingerprint(self) -> dict:
         """记录进化所用数据版本，便于识别“数据没变但一直跑”。"""
         try:
-            from src.data.storage import Storage
-
-            db = Storage(self.db_path)
+            db = _ReadOnlySnapshotStorage(Path(self.db_path))
             rows = db.execute(
                 "SELECT MAX(trade_date) AS latest, COUNT(DISTINCT trade_date) AS days "
                 "FROM daily_price"
@@ -504,11 +1082,8 @@ class EvolutionEngine:
         try:
             content = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
-            # Test fixtures and user-edited YAML may use the Windows ANSI code page.
-            # GB18030 is a compatible superset of GBK/CP936.
             content = raw.decode("gb18030")
         kb = yaml.safe_load(content) or {}
-
         candidates = []
         for theory in kb.get("theories", []):
             for pred in theory.get("testable_predictions", []):
@@ -516,7 +1091,12 @@ class EvolutionEngine:
                     "name": pred["id"],
                     "factor_type": pred.get("factor_type", "conditional"),
                     "source_theory": theory["id"],
+                    "theory_id": theory["id"],
+                    "theory_evidence_grade": theory.get("evidence_grade", "UNSPECIFIED"),
+                    "prediction_evidence_grade": pred.get("evidence_grade", "UNSPECIFIED"),
+                    "behavior_states": list(pred.get("behavior_states", theory.get("behavior_states", []))),
                     "prediction": pred["prediction"],
+                    "testable_target": pred.get("testable_target", pred.get("target")),
                 }
                 if pred.get("conditions"):
                     config["conditions"] = pred["conditions"]
@@ -1154,9 +1734,9 @@ def compute(universe, as_of, db):
         compute_fn = self._extract_compute_fn(candidate.code)
         if compute_fn is not None:
             try:
-                from src.data.storage import Storage
-                db = Storage(self.db_path)
-                backtester = FactorBacktester(db)
+                backtester = FactorBacktester(
+                    _ReadOnlySnapshotStorage(Path(self.db_path))
+                )
                 bt_result = backtester.run(compute_fn, factor_name=candidate.name)
                 if bt_result.error:
                     candidate.error = bt_result.error
@@ -1184,6 +1764,7 @@ def compute(universe, as_of, db):
             and win_rate >= self.MIN_WIN_RATE
         )
         candidate.accepted = False
+        candidate.evaluation["experiment_scope"] = "HYPOTHESIS_ONLY"
         candidate.evaluation["research_stage"] = "DEVELOPMENT_ONLY"
         candidate.evaluation["holdout_opened"] = False
 
